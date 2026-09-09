@@ -42,3 +42,26 @@ def test_submission_api(tmp_path):
         recovered = Application(ControlPlane(kernel))
         assert (await request(recovered, "POST", "/v1/processes", spec, headers))[1]["duplicate"]
     asyncio.run(exercise())
+
+
+def test_inspection_tree_is_read_only(tmp_path):
+    from praxis.kernel.spec import ProcessSpec
+
+    async def exercise():
+        kernel = make_kernel(tmp_path)
+        parent = kernel.create(ProcessSpec("parent", "fake"))
+        child = kernel.create(ProcessSpec("child", "fake"), parent.process_id)
+        kernel.start(child.process_id)
+        await kernel.tasks[child.process_id]
+        app = Application(ControlPlane(kernel))
+        before = tuple(e.to_json() for e in kernel.events)
+        status, tree = await request(app, "GET", f"/v1/processes/{parent.process_id}/tree")
+        assert status == 200 and len(tree["processes"]) == 2
+        assert tree["processes"][0]["children"] == [child.process_id]
+        detail = tree["processes"][1]
+        assert detail["parent_id"] == parent.process_id
+        assert detail["result"]["state"] == "completed" and detail["verification"]["approved"]
+        assert "wall_milliseconds" in detail["usage"]
+        assert (await request(app, "GET", "/v1/processes/missing"))[0] == 404
+        assert tuple(e.to_json() for e in kernel.events) == before
+    asyncio.run(exercise())
