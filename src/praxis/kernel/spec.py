@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from praxis.kernel.budgets import ResourceBudget
 from praxis.kernel.contracts import Contract
 from praxis.kernel.events import EventError, _validate_json
 
@@ -30,6 +31,7 @@ class ProcessSpec:
     capabilities: list[dict[str, Any]] = field(default_factory=list)
     contract: dict[str, Any] = field(default_factory=dict)
     budget: dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
     deadline: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: int = 1
@@ -46,6 +48,12 @@ class ProcessSpec:
             if not isinstance(value, dict):
                 raise SpecError(name, "expected object")
             self._json(name, value)
+        if type(self.priority) is not int:
+            raise SpecError("priority", "expected integer")
+        try:
+            ResourceBudget.from_json(json.dumps(self.budget))
+        except ValueError:
+            raise SpecError("budget", "invalid resource budget") from None
         try:
             Contract.from_json(json.dumps(self.contract))
         except ValueError:
