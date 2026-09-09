@@ -1,0 +1,7 @@
+# Secret providers
+
+Implement `SecretProvider.resolve(name) -> str` in the trusted host (for example, a vault client). Construct `SecretAccess(provider, authority, redaction)` with the same authority as the kernel and the same `RedactionPolicy` as diagnostic exporters. Give a local executor host-owned `secret_bindings={"SERVICE_TOKEN": "service/token"}` and the access object. Issue `Resource.SECRET`, action `read`, scoped to `service/token` to the process before starting it. No provider is installed by default.
+
+Bindings contain names, never values, and are not controlled by ProcessSpec. The full batch is authorized before resolving any value. Values enter only the subprocess environment; they are absent from stored requests and output is redacted before Outcome creation. Revocation denies subsequent access; it cannot withdraw a value already delivered to a running process. Terminate that process and rotate the credential when needed.
+
+Do not place credentials in environment/config/inputs. Those fields are ordinary persisted data. Provider exceptions are converted to a stable error without exception text. Remote workers and third-party agent SDKs must resolve credentials locally through trusted host adapters; controller-resolved values must never be included in dispatch envelopes. A granted workload can deliberately encode or write its secret to an artifact, so restrict artifact publication and network access as described in TM-7. Secret delivery does not claim protection against a malicious authorized recipient.

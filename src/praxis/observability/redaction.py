@@ -14,6 +14,10 @@ class RedactionPolicy:
     def __init__(self, secrets: tuple[str, ...] = ()):
         self._secrets = tuple(sorted((s for s in secrets if s), key=len, reverse=True))
 
+    def register(self, secret: str) -> None:
+        if secret and secret not in self._secrets:
+            self._secrets = tuple(sorted((*self._secrets, secret), key=len, reverse=True))
+
     def clean(self, value: Any, *, _depth: int = 0) -> Any:
         if _depth > 32:
             return REDACTED

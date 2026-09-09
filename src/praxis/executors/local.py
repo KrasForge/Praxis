@@ -5,6 +5,8 @@ import math
 import os
 import signal
 
+from praxis.kernel.secrets import SecretAccess
+from praxis.kernel.authority import AuthorizationError
 from praxis.executors.fake import FakeExecutor
 from praxis.executors.features import ExecutorFeatures
 from praxis.executors.outcomes import Outcome, OutcomeStatus
@@ -14,9 +16,14 @@ from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
 
 
 class LocalProcessExecutor(FakeExecutor):
-    def __init__(self, workspaces: LocalWorkspaces):
+    def __init__(self, workspaces: LocalWorkspaces, *, secrets: SecretAccess | None = None,
+                 secret_bindings: dict[str, str] | None = None):
         super().__init__()
         self.workspaces = workspaces
+        self.secrets = secrets
+        self.secret_bindings = dict(secret_bindings or {})
+        if self.secret_bindings and secrets is None:
+            raise ValueError("secret_provider_required")
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
         self.cancelled: set[str] = set()
@@ -52,11 +59,16 @@ class LocalProcessExecutor(FakeExecutor):
                     type(timeout) not in (float, int) or not math.isfinite(timeout) or timeout <= 0
                 ):
                     return ControlResult(True, False, "invalid_timeout")
+                environment = dict(request.spec.environment)
+                if self.secrets is not None:
+                    environment.update(self.secrets.environment(request.process_id, self.secret_bindings))
                 process = await asyncio.create_subprocess_exec(
-                    *argv, cwd=path, env=request.spec.environment,
+                    *argv, cwd=path, env=environment,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE, start_new_session=os.name == "posix",
                 )
+            except AuthorizationError:
+                return ControlResult(True, False, "secret_capability_denied")
             except (OSError, ValueError):
                 return ControlResult(True, False, "executor_unavailable")
             self.requests[request.attempt_id] = request
@@ -96,8 +108,12 @@ class LocalProcessExecutor(FakeExecutor):
         else:
             status = OutcomeStatus.FAILED
             reason = "signal_terminated" if (process.returncode or 0) < 0 else "exit_nonzero"
-        result = Outcome(status, reason, stdout.decode(errors="replace"),
-                         stderr.decode(errors="replace"), process.returncode)
+        output = stdout.decode(errors="replace")
+        error = stderr.decode(errors="replace")
+        if self.secrets is not None:
+            output = self.secrets.redaction.clean(output)
+            error = self.secrets.redaction.clean(error)
+        result = Outcome(status, reason, output, error, process.returncode)
         self.results[attempt_id] = result
         return result
 
