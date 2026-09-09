@@ -1,6 +1,7 @@
 """Version-one JSON event envelope; unknown fields fail closed."""
 
 import json
+from praxis.kernel.parsing import load_object
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -48,7 +49,7 @@ class Event:
     @classmethod
     def from_json(cls, raw: str) -> "Event":
         try:
-            data = json.loads(raw)
+            data = load_object(raw)
             if not isinstance(data, dict):
                 raise EventError("envelope must be an object")
             required = {"process_id", "type", "payload", "parent_id", "event_id",
@@ -61,17 +62,8 @@ class Event:
 
 
 def _validate_json(value: Any) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if not isinstance(key, str):
-                raise EventError("JSON object keys must be strings")
-            _validate_json(child)
-    elif isinstance(value, list):
-        for child in value:
-            _validate_json(child)
-    elif value is not None and type(value) not in (str, int, float, bool):
-        raise EventError("payload must contain JSON values")
+    from praxis.kernel.parsing import validate_json
     try:
-        json.dumps(value, allow_nan=False)
-    except (ValueError, TypeError, RecursionError):
+        validate_json(value)
+    except ValueError:
         raise EventError("invalid JSON value") from None

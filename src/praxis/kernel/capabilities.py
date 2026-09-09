@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+from praxis.kernel.parsing import load_object
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -93,13 +94,13 @@ class Capability:
     @classmethod
     def from_json(cls, raw: str) -> "Capability":
         try:
-            data = json.loads(raw)
+            data = load_object(raw)
             data["resource"] = Resource(data["resource"])
             if not isinstance(data["actions"], list) or len(data["actions"]) != len(set(data["actions"])):
                 raise ValueError("actions must be a unique array")
             data["actions"] = frozenset(data["actions"])
             return cls(**data)
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        except (ValueError, TypeError, KeyError, AttributeError, OSError, RuntimeError) as exc:
             raise ValueError("invalid capability") from exc
 
 
