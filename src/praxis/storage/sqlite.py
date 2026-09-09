@@ -10,6 +10,7 @@ from praxis.executors.protocol import Checkpoint
 from praxis.kernel.events import Event
 from praxis.kernel.process import Process
 from praxis.storage.integrity import validate_update
+from praxis.storage.migrations import migrate
 from praxis.storage.protocol import StoredCheckpoint, StoredEvent, StoreConflict, StoreError
 
 
@@ -22,22 +23,10 @@ class SQLiteStore:
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
-            version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
-                raise StoreError("unsupported_store_version")
-            self.connection.executescript("""
-                CREATE TABLE IF NOT EXISTS processes (
-                    id TEXT PRIMARY KEY, parent_id TEXT REFERENCES processes(id), body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS events (
-                    cursor INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
-                    process_id TEXT NOT NULL REFERENCES processes(id), body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    process_id TEXT PRIMARY KEY REFERENCES processes(id), attempt_id TEXT NOT NULL,
-                    executor TEXT NOT NULL, protocol_version INTEGER NOT NULL,
-                    payload BLOB NOT NULL, snapshot_id TEXT NOT NULL);
-                PRAGMA user_version=1;
-            """)
-        except sqlite3.DatabaseError as exc:
+            migrate(self.connection)
+        except (sqlite3.DatabaseError, StoreError) as exc:
+            if hasattr(self, "connection"):
+                self.connection.close()
             raise StoreError("cannot_open_store") from exc
 
     @contextmanager
