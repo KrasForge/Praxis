@@ -1,9 +1,13 @@
 """Versioned process graphs with typed dependency requirements."""
 
+import heapq
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from uuid import uuid4
+
+from praxis.kernel.lifecycle import TERMINAL, State
 
 
 class Requirement(str, Enum):
@@ -54,6 +58,53 @@ class ProcessGraph:
             raise ValueError("invalid graph version")
         if not isinstance(self.graph_id, str) or not self.graph_id:
             raise ValueError("graph identity required")
+        self.topological()
+
+    def topological(self) -> tuple[str, ...]:
+        incoming = {node: 0 for node in self.nodes}
+        outgoing: dict[str, list[str]] = {node: [] for node in self.nodes}
+        for edge in self.edges:
+            incoming[edge.dependent] += 1
+            outgoing[edge.prerequisite].append(edge.dependent)
+        ready = [node for node, count in incoming.items() if count == 0]
+        heapq.heapify(ready)
+        order = []
+        while ready:
+            node = heapq.heappop(ready)
+            order.append(node)
+            for child in outgoing[node]:
+                incoming[child] -= 1
+                if incoming[child] == 0:
+                    heapq.heappush(ready, child)
+        if len(order) != len(self.nodes):
+            raise ValueError("dependency_cycle")
+        return tuple(order)
+
+    def resolve(self, node: str, states: Mapping[str, State]) -> "Resolution":
+        if node not in self.nodes or not self.nodes <= states.keys() or any(not isinstance(states[n], State) for n in self.nodes):
+            raise ValueError("missing or invalid graph state")
+        if states[node] in TERMINAL:
+            return Resolution("finished", ())
+        if states[node] != State.PENDING:
+            return Resolution("active", ())
+        blocked = []
+        failed = []
+        for edge in self.edges:
+            if edge.dependent != node:
+                continue
+            state = states[edge.prerequisite]
+            if state not in TERMINAL:
+                blocked.append(edge.prerequisite)
+            elif edge.requirement == Requirement.SUCCESS and state != State.COMPLETED:
+                if edge.on_failure == DependencyFailure.FAIL:
+                    failed.append(edge.prerequisite)
+                elif edge.on_failure == DependencyFailure.BLOCK:
+                    blocked.append(edge.prerequisite)
+        if failed:
+            return Resolution("failed", tuple(sorted(failed)))
+        if blocked:
+            return Resolution("blocked", tuple(sorted(blocked)))
+        return Resolution("runnable", ())
 
     def to_json(self) -> str:
         data = asdict(self)
@@ -76,3 +127,9 @@ class ProcessGraph:
             return cls(**data)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             raise ValueError("invalid process graph") from exc
+
+
+@dataclass(frozen=True)
+class Resolution:
+    state: str
+    prerequisites: tuple[str, ...]
