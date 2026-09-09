@@ -51,7 +51,7 @@ def test_retry_exhaustion_and_effect_replay_guard(tmp_path):
         await kernel.tasks[process.process_id]
         with pytest.raises(RetryError, match="exhausted"):
             await kernel.retry(process.process_id, RetryPolicy(max_attempts=1))
-        kernel.events.append(Event(process.process_id, "effect.applied", {"replay_safe": False}))
+        store.save(process, (Event(process.process_id, "effect.applied", {"replay_safe": False}),))
         with pytest.raises(RetryError, match="unsafe_effect"):
             await kernel.retry(process.process_id, RetryPolicy())
         store.close()
