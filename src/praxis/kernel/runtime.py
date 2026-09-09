@@ -336,10 +336,12 @@ class Kernel:
                 if expanded == family:
                     break
                 family = expanded
+            durable_events = (tuple(entry.event for entry in self.records.read_events())
+                              if isinstance(self.records, ProcessStore) else tuple(self.events))
             if any(event.process_id in family and (
                 event.type == "workspace.committed" or
                 event.type in ("effect.applying", "effect.applied") and event.payload.get("replay_safe") is not True
-            ) for event in self.events):
+            ) for event in durable_events):
                 raise RetryError("unsafe_effect_replay")
             if policy.backoff_seconds:
                 await asyncio.sleep(policy.backoff_seconds * (2 ** (attempts - 1)))
