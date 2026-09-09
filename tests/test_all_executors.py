@@ -20,7 +20,7 @@ from praxis.kernel.spec import ProcessSpec
 from praxis.workspaces.local import LocalWorkspaces
 
 
-@pytest.mark.parametrize("name", ["fake", "local", "shell", "codex", "claude", "deepseek"])
+@pytest.mark.parametrize("name", ["fake", "local", "shell", "codex", "claude", "deepseek", "remote"])
 def test_adapter_conformance(tmp_path, name):
     class Result(SimpleNamespace):
         pass
@@ -43,7 +43,18 @@ def test_adapter_conformance(tmp_path, name):
         executable = tmp_path / "fixture"
         executable.write_text('#!/bin/sh\ncat >/dev/null\nprintf \'{"type":"turn.completed"}\\n\'\n')
         executable.chmod(0o700)
+        from praxis.executors.remote import RemoteExecutor
+        from praxis.remote.node import WorkerNode
+        from praxis.remote.workers import Worker
+        from praxis.storage.sqlite import SQLiteStore
+        worker = Worker("w", "owner", "boot")
+        node = WorkerNode(worker, SQLiteStore(tmp_path / "worker.db"), provider,
+                          {"fake": FakeExecutor()}, lambda credential: True)
+        class Transport:
+            async def request(self, method, path, body=None):
+                return await node.rpc(body, "fixture")
         adapters = {
+            "remote": RemoteExecutor(worker, "fake", provider, Transport()),
             "fake": FakeExecutor(), "local": LocalProcessExecutor(provider),
             "shell": ShellExecutor(provider, authority),
             "codex": CodexExecutor(provider, authority, str(executable)),
