@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import time
+from uuid import uuid4
 from dataclasses import dataclass
 from enum import Enum
 
@@ -18,6 +19,7 @@ from praxis.kernel.effects import Effect
 from praxis.kernel.results import ProcessResult
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
+from praxis.kernel.lineage import Lineage
 from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
 from praxis.kernel.retry import RetryError, RetryPolicy
@@ -60,6 +62,7 @@ class Kernel:
         self.workspaces = workspaces
         self.executors = dict(executors)
         self.assignments: dict[str, str] = {}
+        self.invocations: dict[str, tuple[str, str]] = {}
         self.validators = dict(validators or {})
         self.verification: dict[str, VerificationReport] = {}
         self.canonical_targets: dict[str, CanonicalDirectory] = {}
@@ -143,6 +146,16 @@ class Kernel:
                     self.workspaces.path_for(handle, process.process_id),
                 )
                 self._move(process, State.RUNNING)
+                invocation_id = str(uuid4())
+                previous = next((e.event_id for e in reversed(self.events) if e.process_id == process.process_id), None)
+                invoked = Event(process.process_id, "executor.invoked", {
+                    "invocation_id": invocation_id, "executor": self.executor_name(process),
+                    "attempt_id": process.attempt_id,
+                    "lineage": Lineage(process.process_id, process.attempt_id,
+                                       () if previous is None else (previous,), invocation_id=invocation_id).to_json(),
+                }, parent_id=process.parent_id)
+                self.events.append(invoked)
+                self.invocations[process.process_id] = (invocation_id, invoked.event_id)
                 control = await executor.start(request)
                 self.started[process.process_id].set()
                 if not control.applied:
@@ -301,8 +314,11 @@ class Kernel:
                 except Exception:
                     result = CheckResult(check.check_id, CheckStatus.ERROR, "validator_error")
             results.append(result)
-            self.events.append(Event(process.process_id, "contract.checked", json.loads(result.to_json()),
-                                     parent_id=process.parent_id))
+            invocation = self.invocations[process.process_id]
+            payload = json.loads(result.to_json())
+            payload["lineage"] = Lineage(process.process_id, process.attempt_id, (invocation[1],),
+                                         invocation_id=invocation[0], validator_run_id=str(uuid4())).to_json()
+            self.events.append(Event(process.process_id, "contract.checked", payload, parent_id=process.parent_id))
         report = evaluate(contract, source, tuple(results))
         self.verification[process.process_id] = report
         self.events.append(Event(process.process_id, "contract.evaluated", {
