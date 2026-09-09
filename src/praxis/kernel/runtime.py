@@ -14,6 +14,8 @@ from praxis.kernel.budgets import RESOURCES, ResourceBudget
 from praxis.kernel.authority import Authority, AuthorizationError
 from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
+from praxis.kernel.effects import Effect
+from praxis.kernel.results import ProcessResult
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
@@ -186,6 +188,8 @@ class Kernel:
                                  parent_id=process.parent_id))
         async with self.locks[process.process_id]:
             self._move(process, result.process_state(verified=verified))
+        self.events.append(Event(process.process_id, "process.result", {"result": self.result(process.process_id).to_json()},
+                                 parent_id=process.parent_id))
         if handle is not None:
             if self.authority.authorize(process.process_id, Resource.WORKSPACE,
                                         "destroy", process.process_id).allowed:
@@ -384,6 +388,10 @@ class Kernel:
             elif event.type == "usage.recorded":
                 self.usage.record(event.process_id, event.payload["attempt_id"], event.payload["usage_id"],
                                   event.payload["values"], emit=False)
+            elif event.type == "process.result":
+                result = ProcessResult.from_json(event.payload["result"])
+                if result.verification is not None:
+                    self.verification[result.process_id] = result.verification
             elif event.type == "process.outcome":
                 self.results[event.process_id] = Outcome.from_json(json.dumps(event.payload))
 
@@ -398,3 +406,16 @@ class Kernel:
 
     def executor_name(self, process: Process) -> str:
         return self.assignments.get(process.process_id, process.spec.executor)
+
+    def result(self, process_id: str) -> ProcessResult:
+        process = self.processes[process_id]
+        effects: dict[str, Effect] = {}
+        history = (tuple(entry.event for entry in self.records.read_events(process_id))
+                   if isinstance(self.records, ProcessStore) else tuple(self.events))
+        for event in history:
+            if event.process_id == process_id and event.type.startswith("effect.") and "effect" in event.payload:
+                effect = Effect.from_json(event.payload["effect"])
+                effects[effect.effect_id] = effect
+        return ProcessResult(process_id, process.attempt_id, process.state, self.results[process_id],
+                             verification=self.verification.get(process_id), effects=tuple(effects.values()),
+                             usage=self.usage.total(process_id))
