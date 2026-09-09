@@ -20,11 +20,13 @@ from praxis.workspaces.protocol import WorkspaceHandle
 
 
 class ClaudeExecutor(FakeExecutor):
-    def __init__(self, workspaces: LocalWorkspaces, authority: Authority, sdk: Any = None):
+    def __init__(self, workspaces: LocalWorkspaces, authority: Authority, sdk: Any = None,
+                 *, isolated_worker: bool = False):
         super().__init__()
         self.workspaces = workspaces
         self.authority = authority
         self.sdk = sdk
+        self.isolated_worker = isolated_worker
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
 
     @property
@@ -38,6 +40,8 @@ class ClaudeExecutor(FakeExecutor):
         if not self.authority.authorize(request.process_id, Resource.EXECUTOR,
                                         "execute", "claude").allowed:
             return ControlResult(True, False, "claude_capability_denied")
+        if self.isolated_worker is not True:
+            return ControlResult(True, False, "isolation_required")
         try:
             handle = WorkspaceHandle(request.workspace_id, request.process_id, "local")
             path = self.workspaces.path_for(handle, request.process_id)
