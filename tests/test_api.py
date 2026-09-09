@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from praxis.api.asgi import Application
+from praxis.api.auth import Actor, SecurityHooks
 from praxis.api.service import ControlPlane
 from praxis.executors.fake import FakeExecutor
 from praxis.kernel.authority import Authority
@@ -28,7 +29,7 @@ def make_kernel(tmp_path):
 def test_submission_api(tmp_path):
     async def exercise():
         kernel = make_kernel(tmp_path)
-        app = Application(ControlPlane(kernel))
+        app = trusted_app(ControlPlane(kernel))
         spec = {"objective": "task", "executor": "fake"}
         headers = ((b"idempotency-key", b"request-1"),)
         status, first = await request(app, "POST", "/v1/processes", spec, headers)
@@ -39,7 +40,7 @@ def test_submission_api(tmp_path):
         assert (await request(app, "POST", "/v1/processes", {"executor": "fake"}))[0] == 422
         assert len(kernel.processes) == 1
         await kernel.tasks[first["process_id"]]
-        recovered = Application(ControlPlane(kernel))
+        recovered = trusted_app(ControlPlane(kernel))
         assert (await request(recovered, "POST", "/v1/processes", spec, headers))[1]["duplicate"]
     asyncio.run(exercise())
 
@@ -53,7 +54,7 @@ def test_inspection_tree_is_read_only(tmp_path):
         child = kernel.create(ProcessSpec("child", "fake"), parent.process_id)
         kernel.start(child.process_id)
         await kernel.tasks[child.process_id]
-        app = Application(ControlPlane(kernel))
+        app = trusted_app(ControlPlane(kernel))
         before = tuple(e.to_json() for e in kernel.events)
         status, tree = await request(app, "GET", f"/v1/processes/{parent.process_id}/tree")
         assert status == 200 and len(tree["processes"]) == 2
@@ -78,7 +79,7 @@ def test_sse_reconnect_and_tree_cursors(tmp_path):
         kernel.start(parent.process_id)
         await asyncio.gather(*kernel.tasks.values())
         service = ControlPlane(kernel)
-        app = Application(service)
+        app = trusted_app(service)
         complete = service.events(parent.process_id, tree=True)
         assert {entry.event.process_id for entry in complete} == {parent.process_id, child.process_id}
         async def collect(after, disconnect_after=None):
@@ -107,7 +108,7 @@ def test_controls_reject_stale_attempts_and_retry(tmp_path):
     async def exercise():
         kernel = make_kernel(tmp_path)
         kernel.executors["fake"] = FakeExecutor(Outcome(OutcomeStatus.FAILED, "transient", retryable=True))
-        app = Application(ControlPlane(kernel))
+        app = trusted_app(ControlPlane(kernel))
         _, submitted = await request(app, "POST", "/v1/processes", {"objective": "task", "executor": "fake"})
         pid = submitted["process_id"]
         await kernel.tasks[pid]
@@ -143,7 +144,7 @@ def test_pending_approvals_and_interventions(tmp_path):
         effects = EffectService(kernel.records, authority)
         staged = effects.stage(message_send(child.process_id, child.attempt_id, "channel", "fixture"))
         effects.apply_policy(staged.effect_id, staged.version, EffectPolicy.HUMAN, actor=parent.process_id, reason="review")
-        app = Application(ControlPlane(kernel, effects))
+        app = trusted_app(ControlPlane(kernel, effects), parent.process_id)
         assert len((await request(app, "GET", f"/v1/processes/{parent.process_id}/approvals"))[1]["approvals"]) == 1
         path = f"/v1/processes/{child.process_id}/approvals"
         data = {"effect_id": staged.effect_id, "version": staged.version, "attempt_id": child.attempt_id,
@@ -157,4 +158,26 @@ def test_pending_approvals_and_interventions(tmp_path):
         assert (await request(app, "POST", path, data))[1]["recorded"]
         assert (await request(app, "POST", path, {**data, "attempt_id": "old"}))[0] == 409
         assert child.spec.objective == "child"
+    asyncio.run(exercise())
+
+
+def trusted_app(service, actor="test-operator"):
+    return Application(service, SecurityHooks(lambda headers: Actor(actor), lambda actor, action, pid: True))
+
+
+def test_authentication_authorization_and_actor_audit(tmp_path):
+    async def exercise():
+        kernel = make_kernel(tmp_path)
+        service = ControlPlane(kernel)
+        spec = {"objective": "task", "executor": "fake"}
+        assert (await request(Application(service), "POST", "/v1/processes", spec))[0] == 401
+        denied = Application(service, SecurityHooks(lambda headers: Actor("alice")))
+        assert (await request(denied, "POST", "/v1/processes", spec))[0] == 403
+        assert not kernel.processes
+        allowed = trusted_app(service, "alice")
+        assert (await request(allowed, "POST", "/v1/processes", {**spec, "actor": "mallory"}))[0] == 403
+        _, submitted = await request(allowed, "POST", "/v1/processes", spec)
+        await kernel.tasks[submitted["process_id"]]
+        events = [e for e in kernel.events if e.type in {"process.created", "api.action"}]
+        assert all(e.payload["actor"] == "alice" for e in events)
     asyncio.run(exercise())

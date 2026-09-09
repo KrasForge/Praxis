@@ -1,6 +1,7 @@
 """Control-plane operations over a single kernel owner."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
@@ -32,7 +33,7 @@ class ControlPlane:
         self.kernel = kernel
         self.operation_locks: dict[str, asyncio.Lock] = {}
 
-    def submit(self, data: dict[str, Any], idempotency_key: str | None = None) -> dict[str, Any]:
+    def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *, actor: str = "kernel") -> dict[str, Any]:
         try:
             spec = ProcessSpec.from_json(json.dumps(data, allow_nan=False))
         except (SpecError, ValueError, TypeError) as exc:
@@ -40,6 +41,7 @@ class ControlPlane:
         if idempotency_key is not None:
             if not idempotency_key or len(idempotency_key) > 200:
                 raise APIError(422, "invalid_idempotency_key")
+            idempotency_key = hashlib.sha256((actor + "\0" + idempotency_key).encode()).hexdigest()
             if not isinstance(self.kernel.records, ProcessStore):
                 raise APIError(503, "durable_submission_unavailable")
             for stored in self.kernel.records.read_events():
@@ -50,7 +52,7 @@ class ControlPlane:
                         raise APIError(409, "submission_idempotency_conflict")
                     return {"process_id": previous.process_id, "state": previous.state.value, "duplicate": True}
         try:
-            process = self.kernel.create(spec, submission_key=idempotency_key)
+            process = self.kernel.create(spec, submission_key=idempotency_key, submission_actor=actor)
         except ValueError:
             raise APIError(422, "submission_rejected") from None
         self.kernel.start(process.process_id)
