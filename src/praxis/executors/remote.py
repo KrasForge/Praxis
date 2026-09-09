@@ -23,6 +23,7 @@ class RemoteExecutor(FakeExecutor):
                  transport: JSONTransport, event_sink: Callable[[Event], None] | None = None,
                  features: frozenset[str] = frozenset()):
         super().__init__()
+        self.generation_current: Callable[[], bool] = lambda: True
         self.control_features = features & {"cancel"}
         self.worker = worker
         self.executor = executor
@@ -85,6 +86,8 @@ class RemoteExecutor(FakeExecutor):
         dispatch = self.dispatches[attempt_id]
         try:
             while True:
+                if not self.generation_current():
+                    return Outcome(OutcomeStatus.PARTIAL, "remote_generation_fenced")
                 reply = await self.transport.request("POST", "/v1/worker", {
                     "operation": "poll", "execution_id": dispatch.execution_id, "after": self.cursors.get(attempt_id, 0)})
                 if (reply.get("execution_id"), reply.get("process_id"), reply.get("attempt_id"), reply.get("generation")) != (
@@ -105,6 +108,8 @@ class RemoteExecutor(FakeExecutor):
                 if reply.get("orphaned") is True:
                     return Outcome(OutcomeStatus.PARTIAL, "remote_execution_orphaned")
                 if reply["result"] is not None:
+                    if not self.generation_current():
+                        return Outcome(OutcomeStatus.PARTIAL, "remote_generation_fenced")
                     result = reply["result"]
                     outcome = Outcome.from_json(json.dumps(result["outcome"]))
                     if result["workspace"] is not None:

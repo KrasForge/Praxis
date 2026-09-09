@@ -51,3 +51,33 @@ def test_heartbeat_liveness_and_capability_versions(tmp_path):
     with pytest.raises(WorkerError, match="stale_worker"):
         heartbeats.heartbeat("w", 1, 3, updated, "valid")
     store.close()
+
+
+def test_registration_and_heartbeat_rpc(tmp_path):
+    import asyncio
+    import json
+
+    from praxis.executors.features import ExecutorFeatures
+    from praxis.remote.asgi import WorkerApplication
+    from praxis.remote.heartbeat import Heartbeats, RegistryRPC, WorkerCapabilities
+
+    async def exercise():
+        registry = WorkerRegistry(SQLiteStore(tmp_path / "db"), lambda token, worker: "owner" if token == "Bearer worker" else None)
+        heartbeats = Heartbeats(registry)
+        app = WorkerApplication(RegistryRPC(heartbeats))
+        async def call(body):
+            sent = []
+            async def receive():
+                return {"type": "http.request", "body": json.dumps(body).encode()}
+            async def send(message):
+                sent.append(message)
+            await app({"type": "http", "method": "POST", "path": "/v1/worker",
+                       "headers": [(b"authorization", b"Bearer worker")]}, receive, send)
+            assert sent[0]["status"] == 200
+            return json.loads(sent[1]["body"])
+        assert (await call({"operation": "register", "worker_id": "w", "incarnation": "boot", "protocol_version": 1}))["worker"]["generation"] == 1
+        capabilities = WorkerCapabilities((ExecutorFeatures("fake"),), frozenset({"local"}), 1)
+        assert (await call({"operation": "heartbeat", "worker_id": "w", "generation": 1, "sequence": 1,
+                           "capabilities": json.loads(capabilities.to_json())}))["accepted"]
+        assert "w" in heartbeats.available()
+    asyncio.run(exercise())

@@ -1,15 +1,18 @@
 """Authenticated ASGI endpoint for worker dispatch and event/result polling."""
 
 import json
-from typing import Any
+from typing import Any, Protocol
 
 from praxis.api.asgi import Receive, Send
-from praxis.remote.node import WorkerNode
 from praxis.remote.workers import WorkerError
 
 
+class WorkerRPC(Protocol):
+    async def rpc(self, data: dict[str, Any], credential: str) -> dict[str, Any]: ...
+
+
 class WorkerApplication:
-    def __init__(self, node: WorkerNode):
+    def __init__(self, node: WorkerRPC):
         self.node = node
 
     async def __call__(self, scope: dict[str, Any], receive: Receive, send: Send) -> None:
