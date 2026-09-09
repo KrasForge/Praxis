@@ -43,6 +43,9 @@ def test_staging_checks_and_revocation_before_application(tmp_path):
         authority.revoke(grant.capability_id, actor="kernel", reason="revoked")
         assert not (await service.apply(approved.effect_id, approved.version)).applied
         assert len(adapter.calls) == 1
+        from praxis.observability.runtime import RuntimeMetrics
+        metrics = RuntimeMetrics(lambda after: store.read_events(after=after), lambda pid: "fake").refresh()
+        assert metrics.value("praxis_effects_total", effect_kind="message_send", effect_status="applied") == len(adapter.calls)
         store.close()
     asyncio.run(exercise())
 

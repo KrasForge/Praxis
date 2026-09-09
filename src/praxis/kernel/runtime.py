@@ -26,7 +26,8 @@ from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
 from praxis.kernel.retry import RetryError, RetryPolicy
 from praxis.kernel.usage import UsageLedger
-from praxis.storage.protocol import ProcessStore
+from praxis.observability.runtime import RuntimeMetrics
+from praxis.storage.protocol import ProcessStore, StoredEvent
 from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
 from praxis.validators.protocol import CheckResult, CheckStatus, ValidationInput, Validator
@@ -85,6 +86,11 @@ class Kernel:
         self.budgets = BudgetManager(self.usage)
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self.metrics = RuntimeMetrics(
+            lambda after: records.read_events(after=after) if isinstance(records, ProcessStore) else
+            tuple(StoredEvent(index + 1, event) for index, event in enumerate(self.events) if index >= after),
+            lambda identity: self.processes[identity].spec.executor,
+        )
 
     def create(self, spec: ProcessSpec, parent_id: str | None = None,
                *, canonical: CanonicalDirectory | None = None, submission_key: str | None = None, submission_actor: str | None = None) -> Process:
