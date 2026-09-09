@@ -1,0 +1,1 @@
+{"process_spec":{"objective":"legacy","executor":"fake","schema_version":1},"process_result":{"process_id":"p","attempt_id":"a","state":"failed","outcome":{"status":"failed","reason":"executor_error","schema_version":1},"schema_version":1}}
