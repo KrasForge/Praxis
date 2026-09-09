@@ -14,6 +14,7 @@ class OutcomeStatus(str, Enum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
     PARTIAL = "partial"
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 @dataclass(frozen=True)

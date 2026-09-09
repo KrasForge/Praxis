@@ -9,6 +9,8 @@ from enum import Enum
 
 from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
+from praxis.kernel.allocation import BudgetExceeded, BudgetManager
+from praxis.kernel.budgets import RESOURCES, ResourceBudget
 from praxis.kernel.authority import Authority, AuthorizationError
 from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
@@ -68,6 +70,7 @@ class Kernel:
             self.authority.events = EventJournal(records)
         self.events = self.authority.events
         self.usage = UsageLedger(self.events)
+        self.budgets = BudgetManager(self.usage)
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
@@ -81,6 +84,7 @@ class Kernel:
         if spec.capabilities:
             raise ValueError("capability issuance is not configured")
         process = Process(ProcessSpec.from_json(spec.to_json()), parent_id=parent_id)
+        self.budgets.allocate(process.process_id, ResourceBudget.from_json(json.dumps(spec.budget)), parent_id)
         event = Event(process.process_id, "process.created", parent_id=parent_id)
         self._persist(process, event)
         self.authority.configure_process(process.process_id, parent_id)
@@ -119,6 +123,11 @@ class Kernel:
             executor = self.executors.get(process.spec.executor)
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
+            elif "resource_reporting" not in executor.descriptor.features and any(
+                getattr(self.budgets.limits[process.process_id], resource) is not None
+                for resource in RESOURCES - {"wall_milliseconds"}
+            ):
+                result = Outcome(OutcomeStatus.UNAVAILABLE, "budget_measurement_unavailable")
             else:
                 handle = self.workspaces.create(process.process_id, retain=self.retain_workspaces)
                 self.handles[process.process_id] = handle
@@ -136,12 +145,26 @@ class Kernel:
                 if not control.applied:
                     result = Outcome(OutcomeStatus.UNAVAILABLE, control.reason)
                 else:
-                    result = await executor.collect_result(process.attempt_id)
+                    remaining = self.budgets.remaining(process.process_id, "wall_milliseconds")
+                    try:
+                        if remaining == 0:
+                            raise TimeoutError()
+                        result = await asyncio.wait_for(executor.collect_result(process.attempt_id),
+                                                        None if remaining is None else remaining / 1000)
+                    except TimeoutError:
+                        await executor.cancel(process.attempt_id)
+                        result = Outcome(OutcomeStatus.BUDGET_EXHAUSTED, "wall_budget_exhausted")
         except AuthorizationError:
             result = Outcome(OutcomeStatus.FAILED, "capability_denied")
         except Exception:
             result = Outcome(OutcomeStatus.FAILED, "executor_error")
         self.started[process.process_id].set()
+        measured = {"wall_milliseconds": int((time.monotonic() - started_at) * 1000)}
+        try:
+            self.budgets.check(process.process_id, measured)
+        except BudgetExceeded:
+            result = Outcome(OutcomeStatus.BUDGET_EXHAUSTED, "wall_budget_exhausted")
+        self.usage.record(process.process_id, process.attempt_id, f"{process.attempt_id}:wall", measured)
         try:
             if result.status == OutcomeStatus.COMPLETED and handle is not None:
                 report = await self._verify(process, handle)
@@ -157,9 +180,6 @@ class Kernel:
             result = Outcome(OutcomeStatus.FAILED, "verification_or_commit_error")
             if transaction is not None and not transaction.committed:
                 self.events.append(transaction.rollback())
-        self.usage.record(process.process_id, process.attempt_id, f"{process.attempt_id}:wall", {
-            "wall_milliseconds": int((time.monotonic() - started_at) * 1000),
-        })
         self.results[process.process_id] = result
         self.events.append(Event(process.process_id, "process.outcome", json.loads(result.to_json()),
                                  parent_id=process.parent_id))
@@ -169,6 +189,7 @@ class Kernel:
             if self.authority.authorize(process.process_id, Resource.WORKSPACE,
                                         "destroy", process.process_id).allowed:
                 self.workspaces.cleanup(handle)
+        self.budgets.release(process.process_id)
         return result
 
     async def join(self, parent_id: str, child_ids: list[str]) -> tuple[ChildOutcome, ...]:
@@ -239,6 +260,7 @@ class Kernel:
             elif process.state == State.PENDING:
                 self.results[process_id] = Outcome(OutcomeStatus.CANCELLED, "cancelled")
                 self._move(process, State.CANCELLED)
+                self.budgets.release(process_id)
                 result = ControlResult(True, True, "cancelled")
             else:
                 result = await self.executors[process.spec.executor].cancel(process.attempt_id)
@@ -320,6 +342,7 @@ class Kernel:
                 raise RetryError("unsafe_effect_replay")
             if policy.backoff_seconds:
                 await asyncio.sleep(policy.backoff_seconds * (2 ** (attempts - 1)))
+            self.budgets.reactivate(process_id)
             previous = process.attempt_id
             process.new_attempt()
             self._persist(process, Event(process_id, "process.retry", {
@@ -339,6 +362,9 @@ class Kernel:
         self.processes = {identity: self.records.load(identity) for identity in self.records.list_processes()}
         self.authority.parents = {p.process_id: p.parent_id for p in self.processes.values()}
         self.usage.parents = dict(self.authority.parents)
+        self.budgets.parents = dict(self.authority.parents)
+        self.budgets.limits = {p.process_id: ResourceBudget.from_json(json.dumps(p.spec.budget)) for p in self.processes.values()}
+        self.budgets.active = {p.process_id for p in self.processes.values() if p.state not in TERMINAL}
         for process in self.processes.values():
             self.started[process.process_id] = asyncio.Event()
             self.locks[process.process_id] = asyncio.Lock()
@@ -357,3 +383,12 @@ class Kernel:
                                   event.payload["values"], emit=False)
             elif event.type == "process.outcome":
                 self.results[event.process_id] = Outcome.from_json(json.dumps(event.payload))
+
+    def report_usage(self, process_id: str, attempt_id: str, usage_id: str, values: dict[str, int]) -> None:
+        process = self.processes[process_id]
+        if process.attempt_id != attempt_id or process.state not in (State.RUNNING, State.SUSPENDED):
+            raise ValueError("usage report from inactive attempt")
+        previous = self.usage.entries.get(usage_id)
+        if previous is None:
+            self.budgets.check(process_id, values)
+        self.usage.record(process_id, attempt_id, usage_id, values)
