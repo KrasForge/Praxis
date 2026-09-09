@@ -11,6 +11,7 @@ from praxis.kernel.authority import Authority
 from praxis.kernel.capabilities import Resource
 from praxis.kernel.effects import Effect, EffectKind, EffectStatus
 from praxis.kernel.events import Event
+from praxis.kernel.lineage import Lineage
 from praxis.kernel.process import now
 from praxis.storage.protocol import StoreConflict, StoreError
 from praxis.storage.sqlite import SQLiteStore
@@ -173,9 +174,13 @@ class EffectService:
 
     def _event(self, connection: sqlite3.Connection, effect: Effect, capability_id: str | None) -> None:
         parent = connection.execute("SELECT parent_id FROM processes WHERE id=?", (effect.process_id,)).fetchone()[0]
+        previous = connection.execute("SELECT event_id FROM events WHERE process_id=? ORDER BY cursor DESC LIMIT 1",
+                                      (effect.process_id,)).fetchone()
+        lineage = Lineage(effect.process_id, effect.attempt_id, () if previous is None else (previous[0],), effect_id=effect.effect_id)
         event = Event(effect.process_id, f"effect.{effect.status.value}", {
             "effect_id": effect.effect_id, "attempt_id": effect.attempt_id,
             "effect": effect.to_json(), "capability_id": capability_id, "replay_safe": False,
+            "lineage": lineage.to_json(),
         }, parent_id=parent, event_id=f"effect:{effect.effect_id}:{effect.version}")
         connection.execute("INSERT INTO events(event_id,process_id,body) VALUES(?,?,?)",
                            (event.event_id, effect.process_id, event.to_json()))
