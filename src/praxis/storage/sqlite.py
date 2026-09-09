@@ -9,6 +9,7 @@ from threading import RLock
 from praxis.executors.protocol import Checkpoint
 from praxis.kernel.events import Event
 from praxis.kernel.process import Process
+from praxis.storage.integrity import validate_update
 from praxis.storage.protocol import StoredCheckpoint, StoredEvent, StoreConflict, StoreError
 
 
@@ -54,6 +55,10 @@ class SQLiteStore:
         raw = process.to_json()
         Process.from_json(raw)
         with self._transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute("SELECT body FROM processes WHERE id=?", (process.process_id,)).fetchone()
+            if previous is not None:
+                validate_update(Process.from_json(previous[0]), process)
             connection.execute("INSERT INTO processes(id,parent_id,body) VALUES(?,?,?) "
                                "ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,body=excluded.body",
                                (process.process_id, process.parent_id, raw))

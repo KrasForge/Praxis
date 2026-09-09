@@ -15,6 +15,8 @@ from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
+from praxis.storage.protocol import ProcessStore
+from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
 from praxis.validators.protocol import CheckResult, CheckStatus, ValidationInput, Validator
 from praxis.workspaces.transaction import CanonicalDirectory, WorkspaceTransaction
@@ -43,7 +45,7 @@ class ChildOutcome:
 
 class Kernel:
     def __init__(
-        self, records: ProcessRecords, workspaces: LocalWorkspaces,
+        self, records: ProcessRecords | ProcessStore, workspaces: LocalWorkspaces,
         executors: dict[str, Executor], *, retain_workspaces: bool = False,
         authority: Authority | None = None, validators: dict[str, Validator] | None = None,
     ):
@@ -59,6 +61,8 @@ class Kernel:
         self.results: dict[str, Outcome] = {}
         self.handles: dict[str, WorkspaceHandle] = {}
         self.authority = authority or Authority()
+        if isinstance(records, ProcessStore):
+            self.authority.events = EventJournal(records)
         self.events = self.authority.events
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
@@ -73,14 +77,14 @@ class Kernel:
         if spec.capabilities:
             raise ValueError("capability issuance is not configured")
         process = Process(ProcessSpec.from_json(spec.to_json()), parent_id=parent_id)
-        self.records.save(process)
+        event = Event(process.process_id, "process.created", parent_id=parent_id)
+        self._persist(process, event)
         self.authority.configure_process(process.process_id, parent_id)
         self.processes[process.process_id] = process
         if canonical is not None:
             self.canonical_targets[process.process_id] = canonical
         self.started[process.process_id] = asyncio.Event()
         self.locks[process.process_id] = asyncio.Lock()
-        self.events.append(Event(process.process_id, "process.created", parent_id=parent_id))
         return process
 
     def start(self, process_id: str) -> None:
@@ -96,9 +100,8 @@ class Kernel:
 
     def _move(self, process: Process, state: State) -> None:
         process.move(state)
-        self.records.save(process)
-        self.events.append(Event(process.process_id, "process.state", {"state": state.value},
-                                 parent_id=process.parent_id))
+        self._persist(process, Event(process.process_id, "process.state", {"state": state.value},
+                                     parent_id=process.parent_id))
 
     async def _run(self, process: Process) -> Outcome:
         handle: WorkspaceHandle | None = None
@@ -271,3 +274,10 @@ class Kernel:
             "advisory_failures": list(report.advisory_failures),
         }, parent_id=process.parent_id))
         return report
+
+    def _persist(self, process: Process, event: Event) -> None:
+        if isinstance(self.records, ProcessStore):
+            self.records.save(process, (event,))
+        else:
+            self.records.save(process)
+        self.events.append(event)
