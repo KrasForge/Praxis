@@ -45,3 +45,25 @@ def test_staging_checks_and_revocation_before_application(tmp_path):
         assert len(adapter.calls) == 1
         store.close()
     asyncio.run(exercise())
+
+
+def test_candidate_effect_hold_survives_service_restart(tmp_path):
+    from praxis.kernel.events import Event
+
+    async def exercise():
+        store = SQLiteStore(tmp_path / "runtime.db")
+        process = Process(ProcessSpec("candidate", "fake"))
+        store.save(process, (Event(process.process_id, "candidate.isolated", {"group_id": "g"}),))
+        authority = Authority()
+        authority.issue(process.process_id, Resource.EFFECT, frozenset({"stage", "approve"}), "channel")
+        authority.issue(process.process_id, Resource.EFFECT, frozenset({"apply"}), "message:channel")
+        adapter = RecordingAdapter(store)
+        service = EffectService(store, authority, {EffectKind.MESSAGE_SEND: adapter})
+        staged = service.stage(message_send(process.process_id, process.attempt_id, "channel", "hold"))
+        approved = service.approve(staged.effect_id, staged.version)
+        service = EffectService(store, authority, {EffectKind.MESSAGE_SEND: adapter})
+        assert (await service.apply(approved.effect_id, approved.version)).reason == "candidate_not_selected"
+        assert not adapter.calls
+        assert service.load(approved.effect_id).status == EffectStatus.APPROVED
+        store.close()
+    asyncio.run(exercise())

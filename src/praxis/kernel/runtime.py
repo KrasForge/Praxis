@@ -66,6 +66,8 @@ class Kernel:
         self.validators = dict(validators or {})
         self.verification: dict[str, VerificationReport] = {}
         self.canonical_targets: dict[str, CanonicalDirectory] = {}
+        self.deferred_commits: set[str] = set()
+        self.staged_transactions: dict[str, WorkspaceTransaction] = {}
         self.retain_workspaces = retain_workspaces
         self.processes: dict[str, Process] = {}
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
@@ -135,7 +137,7 @@ class Kernel:
             ):
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "budget_measurement_unavailable")
             else:
-                handle = self.workspaces.create(process.process_id, retain=self.retain_workspaces)
+                handle = self.workspaces.create(process.process_id, retain=self.retain_workspaces or process.process_id in self.deferred_commits)
                 self.handles[process.process_id] = handle
                 canonical = self.canonical_targets.get(process.process_id)
                 if canonical is not None:
@@ -185,7 +187,9 @@ class Kernel:
             if result.status == OutcomeStatus.COMPLETED and handle is not None:
                 report = await self._verify(process, handle)
                 verified = report.approved
-                if verified and transaction is not None:
+                if verified and transaction is not None and process.process_id in self.deferred_commits:
+                    self.staged_transactions[process.process_id] = transaction
+                elif verified and transaction is not None:
                     self.authority.require(process.process_id, Resource.WORKSPACE, "commit", process.process_id)
                     self.authority.require(process.process_id, Resource.FILESYSTEM, "write", str(transaction.canonical.root))
                     self.events.append(transaction.commit(report))
@@ -392,7 +396,11 @@ class Kernel:
             self.started[process.process_id] = asyncio.Event()
             self.locks[process.process_id] = asyncio.Lock()
         for event in self.events:
-            if event.type in ("capability.issued", "capability.delegated"):
+            if event.type == "candidate.isolated":
+                self.deferred_commits.add(event.process_id)
+            elif event.type == "candidate.released":
+                self.deferred_commits.discard(event.process_id)
+            elif event.type in ("capability.issued", "capability.delegated"):
                 raw = event.payload.get("capability")
                 if isinstance(raw, str):
                     capability = Capability.from_json(raw)

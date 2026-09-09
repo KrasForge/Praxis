@@ -194,6 +194,14 @@ class EffectService:
             return EffectReceipt(False, "application_uncertain")
         if effect.status != EffectStatus.APPROVED or effect.version != expected_version:
             return EffectReceipt(False, "effect_not_approved_or_stale")
+        isolated = False
+        for entry in self.store.read_events(effect.process_id):
+            if entry.event.type == "candidate.isolated":
+                isolated = True
+            elif entry.event.type == "candidate.released":
+                isolated = False
+        if isolated:
+            return EffectReceipt(False, "candidate_not_selected")
         approvals = self.approvals(effect_id)
         if not approvals or approvals[-1].effect_version != effect.version or approvals[-1].decision != "approved":
             return EffectReceipt(False, "approval_missing")
