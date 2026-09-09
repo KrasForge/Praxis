@@ -1,13 +1,15 @@
 """Control-plane operations over a single kernel owner."""
 
+import asyncio
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from typing import Any
 
 from praxis.kernel.lifecycle import TERMINAL
 from praxis.kernel.runtime import Kernel
 from praxis.kernel.spec import ProcessSpec, SpecError
-from praxis.storage.protocol import ProcessStore
+from praxis.storage.protocol import ProcessStore, StoredEvent
 
 
 class APIError(ValueError):
@@ -85,3 +87,28 @@ class ControlPlane:
             processes.append(process)
             pending.extend(process["children"])
         return {"root": process_id, "processes": processes}
+
+    def events(self, process_id: str, *, tree: bool = False, after: int = 0) -> tuple[StoredEvent, ...]:
+        self.inspect(process_id)
+        if type(after) is not int or after < 0:
+            raise APIError(422, "invalid_event_cursor")
+        if not isinstance(self.kernel.records, ProcessStore):
+            raise APIError(503, "event_store_unavailable")
+        history = self.kernel.records.read_events()
+        if after > max((entry.cursor for entry in history), default=0):
+            raise APIError(409, "event_cursor_ahead")
+        family = {process_id}
+        if tree:
+            family.update(p["process_id"] for p in self.inspect_tree(process_id)["processes"])
+        return tuple(entry for entry in history if entry.cursor > after and entry.event.process_id in family)
+
+    async def stream(self, process_id: str, *, tree: bool = False, after: int = 0) -> AsyncGenerator[StoredEvent, None]:
+        while True:
+            batch = self.events(process_id, tree=tree, after=after)
+            for entry in batch:
+                after = entry.cursor
+                yield entry
+            family = self.inspect_tree(process_id)["processes"] if tree else [self.inspect(process_id)]
+            if all(p["state"] in {state.value for state in TERMINAL} for p in family):
+                return
+            await asyncio.sleep(0.05)
