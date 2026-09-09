@@ -1,5 +1,6 @@
 """Versioned external effects and explicit lifecycle transitions."""
 
+import base64
 import json
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
@@ -73,6 +74,35 @@ class Effect:
         if type(self.version) is not int or self.version < 0 or type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("invalid effect version")
         _validate_json(self.payload)
+        self._validate_kind()
+
+    def _validate_kind(self) -> None:
+        if self.kind == EffectKind.EXTERNAL:
+            return
+        required = {
+            EffectKind.FILE_WRITE: {"content_base64"},
+            EffectKind.GIT_COMMIT: {"message", "expected_head"},
+            EffectKind.MESSAGE_SEND: {"text"},
+            EffectKind.ARTIFACT_PUBLISH: {"artifact_ref", "media_type"},
+        }[self.kind]
+        if not required <= self.payload.keys() or not self.payload.keys() <= required | {"metadata"}:
+            raise ValueError("invalid typed effect payload")
+        if any(not isinstance(self.payload[key], str) for key in required):
+            raise ValueError("typed effect fields must be strings")
+        if self.kind == EffectKind.FILE_WRITE:
+            base64.b64decode(self.payload["content_base64"], validate=True)
+            target = normalize_scope(Resource.FILESYSTEM, self.target)
+            expected = EffectAuthority(Resource.FILESYSTEM, "write", target)
+            if target != self.target or target == "*":
+                raise ValueError("file effect target must be an absolute path")
+        else:
+            prefix = {EffectKind.GIT_COMMIT: "git", EffectKind.MESSAGE_SEND: "message",
+                      EffectKind.ARTIFACT_PUBLISH: "artifact"}[self.kind]
+            expected = EffectAuthority(Resource.EFFECT, "apply", f"{prefix}:{self.target}")
+        if self.authority != expected:
+            raise ValueError("effect authority does not match operation")
+        if self.kind in (EffectKind.MESSAGE_SEND, EffectKind.ARTIFACT_PUBLISH) and self.reversible:
+            raise ValueError("external publication is not implicitly reversible")
 
     def move(self, status: EffectStatus) -> "Effect":
         if not isinstance(status, EffectStatus) or status not in EFFECT_TRANSITIONS[self.status]:
@@ -94,3 +124,27 @@ class Effect:
             return cls(**data)
         except (TypeError, ValueError, KeyError, RecursionError) as exc:
             raise ValueError("invalid effect") from exc
+
+
+def file_write(process_id: str, attempt_id: str, target: str, content: bytes) -> Effect:
+    target = normalize_scope(Resource.FILESYSTEM, target)
+    return Effect(process_id, attempt_id, EffectKind.FILE_WRITE, target,
+                  {"content_base64": base64.b64encode(content).decode()}, True,
+                  EffectAuthority(Resource.FILESYSTEM, "write", target))
+
+
+def git_commit(process_id: str, attempt_id: str, repository: str, message: str, expected_head: str) -> Effect:
+    return Effect(process_id, attempt_id, EffectKind.GIT_COMMIT, repository,
+                  {"message": message, "expected_head": expected_head}, True,
+                  EffectAuthority(Resource.EFFECT, "apply", f"git:{repository}"))
+
+
+def message_send(process_id: str, attempt_id: str, destination: str, text: str) -> Effect:
+    return Effect(process_id, attempt_id, EffectKind.MESSAGE_SEND, destination, {"text": text}, False,
+                  EffectAuthority(Resource.EFFECT, "apply", f"message:{destination}"))
+
+
+def artifact_publish(process_id: str, attempt_id: str, destination: str, artifact_ref: str, media_type: str) -> Effect:
+    return Effect(process_id, attempt_id, EffectKind.ARTIFACT_PUBLISH, destination,
+                  {"artifact_ref": artifact_ref, "media_type": media_type}, False,
+                  EffectAuthority(Resource.EFFECT, "apply", f"artifact:{destination}"))
