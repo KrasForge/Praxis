@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from praxis.executors.outcomes import Outcome
+from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import State
 from praxis.kernel.runtime import Kernel
@@ -52,6 +52,7 @@ class Supervisor:
         except Exception:
             for identity in children:
                 child = self.kernel.processes[identity]
+                self.kernel.results[identity] = Outcome(OutcomeStatus.CANCELLED, "fork_setup_failed")
                 self.kernel._move(child, State.CANCELLED)
                 self.kernel.budgets.release(identity)
             self.kernel.events.append(Event(self.process_id, "supervisor.fork_failed", {"children": children},
