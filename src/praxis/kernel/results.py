@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, dataclass, field
 
 from praxis.executors.outcomes import Outcome
+from praxis.observability.errors import RuntimeErrorRecord, classify
 from praxis.kernel.budgets import RESOURCES
 from praxis.kernel.claims import Claim
 from praxis.kernel.effects import Effect
@@ -28,12 +29,17 @@ class ProcessResult:
     effects: tuple[Effect, ...] = ()
     usage: dict[str, int] = field(default_factory=dict)
     schema_version: int = 1
+    error: RuntimeErrorRecord | None = None
 
     def __post_init__(self) -> None:
         if not self.process_id or not self.attempt_id or not isinstance(self.state, State) or self.state not in TERMINAL:
             raise ValueError("terminal process identity and state required")
         if not isinstance(self.outcome, Outcome):
             raise ValueError("structured outcome required")
+        if self.error is None:
+            object.__setattr__(self, "error", classify(self.outcome, self.state))
+        elif not isinstance(self.error, RuntimeErrorRecord) or self.state == State.COMPLETED:
+            raise ValueError("invalid result error")
         verified = self.verification is not None and self.verification.approved is True
         if self.state != self.outcome.process_state(verified=verified):
             raise ValueError("result_state_outcome_verification_mismatch")
@@ -60,6 +66,8 @@ class ProcessResult:
         try:
             data = json.loads(raw)
             data["state"] = State(data["state"])
+            if data.get("error") is not None:
+                data["error"] = RuntimeErrorRecord.from_json(json.dumps(data["error"]))
             data["outcome"] = Outcome.from_json(json.dumps(data["outcome"]))
             for name, model in (("artifacts", Reference), ("evidence", Reference), ("claims", Claim), ("effects", Effect)):
                 data[name] = tuple(model.from_json(json.dumps(value)) for value in data.get(name, []))
