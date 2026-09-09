@@ -11,7 +11,7 @@ from enum import Enum
 from praxis.knowledge.context import ContextProvider, ContextResponse, bound_response
 from praxis.knowledge.dependencies import ContextDependency, RequiredContextUnavailable
 from praxis.executors.outcomes import Outcome, OutcomeStatus
-from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
+from praxis.executors.protocol import CommitGuard, ControlResult, ExecutionRequest, Executor
 from praxis.kernel.allocation import BudgetExceeded, BudgetManager
 from praxis.kernel.budgets import RESOURCES, ResourceBudget
 from praxis.kernel.authority import Authority, AuthorizationError
@@ -200,6 +200,9 @@ class Kernel:
             if result.status == OutcomeStatus.COMPLETED and handle is not None:
                 report = await self._verify(process, handle)
                 verified = report.approved
+                if verified and isinstance(executor, CommitGuard) and not executor.commit_allowed(process.attempt_id):
+                    verified = False
+                    result = Outcome(OutcomeStatus.PARTIAL, "remote_generation_fenced")
                 if verified and transaction is not None and process.process_id in self.deferred_commits:
                     self.staged_transactions[process.process_id] = transaction
                 elif verified and transaction is not None:
@@ -353,7 +356,7 @@ class Kernel:
             self.records.save(process)
         self.events.append(event)
 
-    async def retry(self, process_id: str, policy: RetryPolicy) -> str:
+    async def retry(self, process_id: str, policy: RetryPolicy, *, start: bool = True) -> str:
         process = self.processes[process_id]
         self.authority.require(process_id, Resource.EXECUTOR, "control", self.executor_name(process))
         async with self.locks[process_id]:
@@ -397,7 +400,8 @@ class Kernel:
             }, parent_id=process.parent_id))
             self.tasks.pop(process_id, None)
             self.started[process_id] = asyncio.Event()
-            self.start(process_id)
+            if start:
+                self.start(process_id)
             return process.attempt_id
 
     def recover_records(self) -> None:

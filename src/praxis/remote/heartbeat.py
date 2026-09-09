@@ -96,14 +96,14 @@ class Heartbeats:
                                (worker_id, "worker.heartbeat", now(), json.dumps({"generation": generation, "sequence": sequence,
                                                                                "capabilities": json.loads(raw)})))
 
-    def available(self) -> dict[str, WorkerCapabilities]:
+    def available(self, *, include_saturated: bool = False) -> dict[str, WorkerCapabilities]:
         result = {}
         with self.registry.store._transaction() as connection:
             for identity, generation, seen, raw in connection.execute("SELECT worker_id,generation,seen,capabilities FROM worker_status"):
                 age = self.clock() - seen
                 if 0 <= age < self.ttl and self.registry.load(identity).generation == generation:
                     capabilities = WorkerCapabilities.from_json(raw)
-                    if capabilities.capacity > 0:
+                    if include_saturated or capabilities.capacity > 0:
                         result[identity] = capabilities
         return result
 
