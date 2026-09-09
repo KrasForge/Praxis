@@ -64,7 +64,7 @@ class Kernel:
             raise ValueError("capability issuance is not configured")
         process = Process(ProcessSpec.from_json(spec.to_json()), parent_id=parent_id)
         self.records.save(process)
-        self.authority.configure_process(process.process_id)
+        self.authority.configure_process(process.process_id, parent_id)
         self.processes[process.process_id] = process
         self.started[process.process_id] = asyncio.Event()
         self.locks[process.process_id] = asyncio.Lock()

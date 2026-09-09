@@ -24,8 +24,14 @@ class Authority:
         self.execution_defaults = execution_defaults
         self.grants: dict[str, Capability] = {}
         self.events: list[Event] = []
+        self.parents: dict[str, str | None] = {}
 
-    def configure_process(self, process_id: str) -> None:
+    def configure_process(self, process_id: str, parent_id: str | None = None) -> None:
+        if process_id in self.parents:
+            raise ValueError("process already configured")
+        if parent_id is not None and parent_id not in self.parents:
+            raise ValueError("unknown parent")
+        self.parents[process_id] = parent_id
         for executor in sorted(self.execution_defaults):
             self.issue(process_id, Resource.EXECUTOR, frozenset({"execute", "control"}), executor)
         if self.execution_defaults:
@@ -75,3 +81,29 @@ class Authority:
         decision = self.authorize(recipient, resource, action, target)
         if not decision.allowed:
             raise AuthorizationError(decision.reason)
+
+    def delegate(
+        self, parent_id: str, child_id: str, capability_id: str,
+        *, actions: frozenset[str], scope: str, max_bytes: int | None = None,
+        expires_at: str | None = None,
+    ) -> Capability:
+        parent = self.grants.get(capability_id)
+        if parent is None or parent.recipient != parent_id:
+            raise AuthorizationError("unknown_parent_capability")
+        if child_id not in self.parents or self.parents[child_id] != parent_id:
+            raise AuthorizationError("not_direct_child")
+        if parent.expires_at is not None and datetime.fromisoformat(parent.expires_at) <= datetime.fromisoformat(now()):
+            raise AuthorizationError("capability_expired")
+        child = Capability(
+            parent.resource, actions, scope, parent_id, child_id, parent_id=capability_id,
+            max_bytes=parent.max_bytes if max_bytes is None else max_bytes,
+            expires_at=parent.expires_at if expires_at is None else expires_at,
+        )
+        if not child.is_subset_of(parent):
+            raise AuthorizationError("delegation_widens_authority")
+        self.grants[child.capability_id] = child
+        self.events.append(Event(child_id, "capability.delegated", {
+            "capability_id": child.capability_id, "parent_capability_id": capability_id,
+            "issuer": parent_id, "recipient": child_id, "issued_at": child.issued_at,
+        }, parent_id=parent_id))
+        return child
