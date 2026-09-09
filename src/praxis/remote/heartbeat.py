@@ -9,6 +9,7 @@ from typing import Any
 
 from praxis.executors.features import ExecutorFeatures
 from praxis.kernel.process import now
+from praxis.compatibility import negotiate
 from praxis.remote.workers import WorkerError, WorkerRegistry
 
 
@@ -115,8 +116,9 @@ class RegistryRPC:
 
     async def rpc(self, data: dict[str, Any], credential: str) -> dict[str, Any]:
         if data.get("operation") == "register":
+            version = negotiate("worker", data["protocol_versions"]) if "protocol_versions" in data else data["protocol_version"]
             worker = self.heartbeats.registry.register(data["worker_id"], data["incarnation"],
-                data["protocol_version"], credential, replace_generation=data.get("replace_generation"))
+                version, credential, replace_generation=data.get("replace_generation"))
             return {"worker": asdict(worker)}
         if data.get("operation") == "heartbeat":
             self.heartbeats.heartbeat(data["worker_id"], data["generation"], data["sequence"],
