@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from praxis.kernel.lifecycle import TERMINAL
+from praxis.kernel.effect_service import EffectService
 from praxis.kernel.events import Event
 from praxis.kernel.retry import RetryPolicy
 from praxis.kernel.runtime import CancellationPolicy, Kernel, ProcessSignal
@@ -26,7 +27,8 @@ class APIError(ValueError):
 
 
 class ControlPlane:
-    def __init__(self, kernel: Kernel):
+    def __init__(self, kernel: Kernel, effects: EffectService | None = None):
+        self.effects = effects
         self.kernel = kernel
         self.operation_locks: dict[str, asyncio.Lock] = {}
 
@@ -152,3 +154,53 @@ class ControlPlane:
             self.kernel.events.append(Event(process_id, "api.control", {
                 "operation": operation, "attempt_id": process.attempt_id, "response": response}, parent_id=process.parent_id))
             return {"process_id": process_id, "attempt_id": process.attempt_id, "control": response}
+
+    def pending_approvals(self, process_id: str) -> dict[str, Any]:
+        family = {p["process_id"] for p in self.inspect_tree(process_id)["processes"]}
+        if self.effects is None:
+            raise APIError(503, "effect_service_unavailable")
+        return {"approvals": [json.loads(effect.to_json()) for effect in self.effects.pending()
+                              if effect.process_id in family]}
+
+    def resolve_approval(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self.inspect(process_id)
+        if self.effects is None:
+            raise APIError(503, "effect_service_unavailable")
+        try:
+            effect = self.effects.load(data["effect_id"])
+            process = self.kernel.processes[process_id]
+            if effect.process_id != process_id or effect.attempt_id != process.attempt_id:
+                raise APIError(409, "stale_effect_process")
+            if data.get("attempt_id") != process.attempt_id:
+                raise APIError(409, "stale_process_attempt")
+            actor, reason = data["actor"], data["reason"]
+            if not isinstance(actor, str) or not actor or not isinstance(reason, str) or not reason.strip():
+                raise ValueError("actor and reason required")
+            updated = self.effects.resolve_approval(effect.effect_id, data["version"], data["approved"],
+                                                    actor=actor, reason=reason)
+            return {"effect": json.loads(updated.to_json()),
+                    "approvals": [asdict(record) for record in self.effects.approvals(effect.effect_id)]}
+        except APIError:
+            raise
+        except (ValueError, TypeError, KeyError, PermissionError):
+            raise APIError(409, "approval_rejected") from None
+
+    async def intervene(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self.inspect(process_id)
+        process = self.kernel.processes[process_id]
+        if data.get("attempt_id") != process.attempt_id or process.state in TERMINAL:
+            raise APIError(409, "stale_intervention")
+        kind, content = data.get("kind"), data.get("content")
+        actor, reason = data.get("actor"), data.get("reason")
+        if kind not in {"instruction", "signal"} or any(not isinstance(v, str) or not v.strip()
+                                                        for v in (content, actor, reason)):
+            raise APIError(422, "invalid_intervention")
+        response = None
+        if kind == "signal":
+            response = await self.control(process_id, {"operation": "signal", "signal": content,
+                                                       "attempt_id": process.attempt_id})
+        event = Event(process_id, "process.intervention", {"kind": kind, "content": content,
+                      "actor": actor, "reason": reason, "attempt_id": process.attempt_id,
+                      "control": response}, parent_id=process.parent_id)
+        self.kernel.events.append(event)
+        return {"event_id": event.event_id, "recorded": True, "control": response}
