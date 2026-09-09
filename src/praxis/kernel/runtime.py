@@ -143,6 +143,8 @@ class Kernel:
             self.authority.require(process.process_id, Resource.WORKSPACE, "create", process.process_id)
             context = await self._resolve_context(process)
             execution_spec = replace(process.spec, context=[], inputs={**process.spec.inputs, "praxis.context": context}) if process.spec.context else process.spec
+            # Executors receive detached data, never aliases of kernel policy.
+            execution_spec = ProcessSpec.from_json(execution_spec.to_json())
             executor = self.executors.get(self.executor_name(process))
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
