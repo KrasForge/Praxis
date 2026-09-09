@@ -56,4 +56,10 @@ class Application:
         if method == "POST" and path == "/v1/processes":
             result = self.service.submit(data, key)
             return (200 if result["duplicate"] else 202), result
+        parts = path.strip("/").split("/")
+        if method == "GET" and len(parts) in (3, 4) and parts[:2] == ["v1", "processes"]:
+            if len(parts) == 3:
+                return 200, self.service.inspect(parts[2])
+            if parts[3] == "tree":
+                return 200, self.service.inspect_tree(parts[2])
         raise APIError(404, "route_not_found")
