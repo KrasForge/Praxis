@@ -4,11 +4,15 @@ Interface: https://learn.chatgpt.com/docs/non-interactive-mode
 The host must provision Codex credentials in the explicit process environment.
 """
 
+import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import replace
 
 from praxis.executors.features import ExecutorFeatures
 from praxis.executors.local import LocalProcessExecutor
+from praxis.executors.outcomes import Outcome, OutcomeStatus
+from praxis.kernel.events import Event
 from praxis.executors.protocol import ControlResult, ExecutionRequest
 from praxis.kernel.authority import Authority
 from praxis.kernel.capabilities import Resource
@@ -17,14 +21,16 @@ from praxis.workspaces.local import LocalWorkspaces
 
 class CodexExecutor(LocalProcessExecutor):
     def __init__(self, workspaces: LocalWorkspaces, authority: Authority,
-                 executable: str = "codex"):
+                 executable: str = "codex", event_sink: Callable[[Event], None] | None = None):
         super().__init__(workspaces)
         self.authority = authority
         self.executable = executable
+        self.events: list[Event] = []
+        self.event_sink = event_sink
 
     @property
     def descriptor(self) -> ExecutorFeatures:
-        return ExecutorFeatures("codex", frozenset({"cancel"}))
+        return ExecutorFeatures("codex", frozenset({"cancel", "streaming"}))
 
     def map_request(self, request: ExecutionRequest) -> ExecutionRequest:
         options = request.spec.metadata.get("codex", {})
@@ -59,3 +65,59 @@ class CodexExecutor(LocalProcessExecutor):
         except ValueError:
             return ControlResult(True, False, "invalid_codex_options")
         return await super().start(mapped)
+
+    async def _collect(
+        self, attempt_id: str, process: asyncio.subprocess.Process,
+        stdin: bytes, timeout: float | None,
+    ) -> Outcome:
+        assert process.stdin is not None and process.stdout is not None
+        assert process.stderr is not None
+        request = self.requests[attempt_id]
+        stderr_task = asyncio.create_task(process.stderr.read())
+        messages: list[str] = []
+        terminal: str | None = None
+        malformed = False
+        try:
+            process.stdin.write(stdin)
+            await process.stdin.drain()
+            process.stdin.close()
+            async for line in process.stdout:
+                try:
+                    raw = json.loads(line)
+                    if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
+                        raise ValueError("invalid event")
+                    event = Event(request.process_id, "executor.stream", {
+                        "attempt_id": attempt_id, "executor": "codex", "codex": raw})
+                    event.to_json()
+                    self.events.append(event)
+                    if self.event_sink is not None:
+                        self.event_sink(event)
+                    if raw["type"] in {"turn.completed", "turn.failed", "error"}:
+                        terminal = raw["type"]
+                    item = raw.get("item", {})
+                    if raw["type"] == "item.completed" and isinstance(item, dict):
+                        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                            messages.append(item["text"])
+                except (ValueError, TypeError):
+                    malformed = True
+            await process.wait()
+        except (OSError, ValueError):
+            malformed = True
+            self._kill(process)
+            await process.wait()
+        stderr = (await stderr_task).decode(errors="replace")
+        if attempt_id in self.cancelled:
+            status, reason = OutcomeStatus.CANCELLED, "cancelled"
+        elif malformed:
+            status, reason = OutcomeStatus.PARTIAL, "codex_invalid_stream"
+        elif terminal in {"turn.failed", "error"}:
+            status, reason = OutcomeStatus.FAILED, "codex_turn_failed"
+        elif terminal == "turn.completed" and process.returncode == 0:
+            status, reason = OutcomeStatus.COMPLETED, "codex_completed"
+        elif self.events and any(e.payload["attempt_id"] == attempt_id for e in self.events):
+            status, reason = OutcomeStatus.PARTIAL, "codex_incomplete_stream"
+        else:
+            status, reason = OutcomeStatus.UNAVAILABLE, "codex_unavailable"
+        outcome = Outcome(status, reason, "\n".join(messages), stderr, process.returncode)
+        self.results[attempt_id] = outcome
+        return outcome

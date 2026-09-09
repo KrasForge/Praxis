@@ -26,3 +26,37 @@ def test_codex_mapping(tmp_path):
     with pytest.raises(ValueError):
         adapter.map_request(replace(request, spec=replace(
             request.spec, metadata={"codex": {"sandbox": "danger-full-access"}})))
+
+
+def test_codex_stream_fixtures(tmp_path):
+    import asyncio
+
+    from praxis.executors.outcomes import OutcomeStatus
+    from praxis.kernel.capabilities import Resource
+
+    async def exercise():
+        provider = LocalWorkspaces(tmp_path / "workspaces")
+        authority = Authority()
+        authority.issue("p", Resource.EXECUTOR, frozenset({"execute"}), "codex")
+        for index, (events, expected) in enumerate([
+            ([{"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}},
+              {"type": "turn.completed"}], OutcomeStatus.COMPLETED),
+            ([{"type": "turn.failed"}], OutcomeStatus.FAILED),
+            ([{"type": "thread.started"}], OutcomeStatus.PARTIAL),
+            ([], OutcomeStatus.UNAVAILABLE),
+        ]):
+            executable = tmp_path / f"fixture{index}"
+            executable.write_text("#!/bin/sh\ncat >/dev/null\n" + "\n".join(
+                "printf '%s\\n' '" + json.dumps(event) + "'" for event in events))
+            executable.chmod(0o700)
+            handle = provider.create("p")
+            adapter = CodexExecutor(provider, authority, str(executable))
+            request = ExecutionRequest("p", str(index), ProcessSpec("task", "codex"),
+                                       handle.workspace_id, provider.path_for(handle, "p"))
+            assert (await adapter.start(request)).applied
+            result = await adapter.collect_result(str(index))
+            assert result.status == expected
+            assert len(adapter.events) == len(events)
+            if expected == OutcomeStatus.COMPLETED:
+                assert result.stdout == "answer"
+    asyncio.run(exercise())
