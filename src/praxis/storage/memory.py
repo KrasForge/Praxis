@@ -4,6 +4,7 @@ from threading import RLock
 
 from praxis.kernel.events import Event
 from praxis.kernel.process import Process
+from praxis.storage.integrity import validate_update
 from praxis.storage.protocol import StoredCheckpoint, StoredEvent, StoreConflict, StoreError
 
 
@@ -26,6 +27,8 @@ class MemoryStore:
             self._open()
             if process.parent_id is not None and process.parent_id not in self.processes:
                 raise StoreError("missing_parent")
+            if process.process_id in self.processes:
+                validate_update(Process.from_json(self.processes[process.process_id]), process)
             known = {entry.event.event_id: entry.event.to_json() for entry in self.events}
             pending = []
             for event in events:
