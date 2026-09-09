@@ -4,6 +4,7 @@ import pytest
 
 from praxis.executors.fake import FakeExecutor
 from praxis.executors.outcomes import Outcome, OutcomeStatus
+from praxis.kernel.authority import Authority
 from praxis.kernel.lifecycle import State
 from praxis.kernel.process import ProcessRecords
 from praxis.kernel.runtime import Kernel
@@ -16,7 +17,7 @@ def test_nested_spawn_join_partial_failure(tmp_path):
         kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"), {
             "ok": FakeExecutor(),
             "fail": FakeExecutor(Outcome(OutcomeStatus.FAILED, "fixture.failed")),
-        })
+        }, authority=Authority(execution_defaults=frozenset({"ok", "fail", "missing"})))
         parent = kernel.create(ProcessSpec("supervise", "ok"))
         child = kernel.create(ProcessSpec("nested", "ok"), parent.process_id)
         nested = kernel.spawn(child.process_id, ProcessSpec("worker", "ok"))
@@ -26,7 +27,7 @@ def test_nested_spawn_join_partial_failure(tmp_path):
         outcomes = await kernel.join(parent.process_id, [child.process_id, failed])
         assert [o.state for o in outcomes] == [State.COMPLETED, State.FAILED]
         assert kernel.records.load(nested).parent_id == child.process_id
-        assert kernel.events[-1].type == "process.state"
+        assert [e for e in kernel.events if e.type == "process.state"][-1].payload["state"] == "failed"
         with pytest.raises(ValueError):
             await kernel.join(parent.process_id, [nested])
     asyncio.run(exercise())
@@ -35,7 +36,7 @@ def test_nested_spawn_join_partial_failure(tmp_path):
 def test_unavailable_and_unverified_fail_closed(tmp_path):
     async def exercise():
         kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"),
-                        {"ok": FakeExecutor()})
+                        {"ok": FakeExecutor()}, authority=Authority(execution_defaults=frozenset({"ok", "missing"})))
         parent = kernel.create(ProcessSpec("parent", "ok"))
         missing = kernel.spawn(parent.process_id, ProcessSpec("work", "missing"))
         unverified = kernel.spawn(parent.process_id, ProcessSpec("work", "ok", contract={"check": 1}))

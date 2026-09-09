@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 from praxis.executors.local import LocalProcessExecutor
+from praxis.kernel.authority import Authority
 from praxis.kernel.lifecycle import State
 from praxis.kernel.process import ProcessRecords
 from praxis.kernel.runtime import CancellationPolicy, Kernel, ProcessSignal
@@ -13,7 +14,8 @@ def test_suspend_resume_and_tree_cancel(tmp_path):
     async def exercise():
         workspaces = LocalWorkspaces(tmp_path / "ws")
         kernel = Kernel(ProcessRecords(tmp_path / "records"), workspaces,
-                        {"local": LocalProcessExecutor(workspaces)})
+                        {"local": LocalProcessExecutor(workspaces)},
+                        authority=Authority(execution_defaults=frozenset({"local"})))
         parent = kernel.create(ProcessSpec("parent", "local"))
         child = kernel.spawn(parent.process_id, ProcessSpec("wait", "local", inputs={
             "argv": [sys.executable, "-c", "import time; time.sleep(60)"], "timeout": 10,
@@ -34,7 +36,8 @@ def test_suspend_resume_and_tree_cancel(tmp_path):
 
 def test_self_cancellation_preserves_children(tmp_path):
     async def exercise():
-        kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"), {})
+        kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"), {},
+                        authority=Authority(execution_defaults=frozenset({"none"})))
         parent = kernel.create(ProcessSpec("parent", "none"))
         child = kernel.create(ProcessSpec("child", "none"), parent.process_id)
         await kernel.cancel(parent.process_id)
