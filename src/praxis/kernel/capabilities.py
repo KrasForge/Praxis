@@ -118,11 +118,12 @@ def normalize_scope(resource: Resource, scope: str) -> str:
         host = scope[2:] if wildcard else scope
         try:
             address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None:
             if wildcard:
                 raise ValueError("IP wildcards are unsupported")
             return str(address)
-        except ValueError:
-            pass
         host = host.rstrip(".").encode("idna").decode("ascii").lower()
         if len(host) > 253 or not all(
             re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)

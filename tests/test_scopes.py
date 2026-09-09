@@ -32,3 +32,8 @@ def test_narrowed_filesystem_capability(tmp_path):
     child = Capability(Resource.FILESYSTEM, frozenset({"read"}), str(tmp_path / "child"), "p", "c")
     assert child.is_subset_of(parent)
     assert not parent.is_subset_of(child)
+
+
+def test_ip_wildcard_rejected():
+    with pytest.raises(ValueError):
+        normalize_scope(Resource.NETWORK, "*.127.0.0.1")
