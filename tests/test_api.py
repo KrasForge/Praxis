@@ -65,3 +65,37 @@ def test_inspection_tree_is_read_only(tmp_path):
         assert (await request(app, "GET", "/v1/processes/missing"))[0] == 404
         assert tuple(e.to_json() for e in kernel.events) == before
     asyncio.run(exercise())
+
+
+def test_sse_reconnect_and_tree_cursors(tmp_path):
+    from praxis.kernel.spec import ProcessSpec
+
+    async def exercise():
+        kernel = make_kernel(tmp_path)
+        parent = kernel.create(ProcessSpec("parent", "fake"))
+        child = kernel.create(ProcessSpec("child", "fake"), parent.process_id)
+        kernel.start(child.process_id)
+        kernel.start(parent.process_id)
+        await asyncio.gather(*kernel.tasks.values())
+        service = ControlPlane(kernel)
+        app = Application(service)
+        complete = service.events(parent.process_id, tree=True)
+        assert {entry.event.process_id for entry in complete} == {parent.process_id, child.process_id}
+        async def collect(after, disconnect_after=None):
+            incoming = asyncio.Queue()
+            await incoming.put({"type": "http.request", "body": b""})
+            events = []
+            async def send(message):
+                if message["type"] == "http.response.body" and message.get("body"):
+                    raw = message["body"].decode().split("data: ", 1)[1].strip()
+                    events.append(json.loads(raw))
+                    if len(events) == disconnect_after:
+                        await incoming.put({"type": "http.disconnect"})
+            await app({"type": "http", "method": "GET", "path": f"/v1/processes/{parent.process_id}/events",
+                       "query_string": b"tree=true", "headers": [(b"last-event-id", str(after).encode())]}, incoming.get, send)
+            return events
+        first = await collect(0, 3)
+        second = await collect(first[-1]["cursor"])
+        assert [e["cursor"] for e in first + second] == [entry.cursor for entry in complete]
+        assert len({e["event"]["event_id"] for e in first + second}) == len(complete)
+    asyncio.run(exercise())
