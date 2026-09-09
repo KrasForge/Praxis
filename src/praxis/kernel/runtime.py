@@ -9,12 +9,13 @@ from enum import Enum
 from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
 from praxis.kernel.authority import Authority, AuthorizationError
-from praxis.kernel.capabilities import Resource
+from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
+from praxis.kernel.retry import RetryError, RetryPolicy
 from praxis.storage.protocol import ProcessStore
 from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
@@ -152,6 +153,8 @@ class Kernel:
             if transaction is not None and not transaction.committed:
                 self.events.append(transaction.rollback())
         self.results[process.process_id] = result
+        self.events.append(Event(process.process_id, "process.outcome", json.loads(result.to_json()),
+                                 parent_id=process.parent_id))
         async with self.locks[process.process_id]:
             self._move(process, result.process_state(verified=verified))
         if handle is not None:
@@ -281,3 +284,64 @@ class Kernel:
         else:
             self.records.save(process)
         self.events.append(event)
+
+    async def retry(self, process_id: str, policy: RetryPolicy) -> str:
+        process = self.processes[process_id]
+        self.authority.require(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+        async with self.locks[process_id]:
+            if process.state != State.FAILED:
+                raise RetryError("process_not_failed")
+            outcome = self.results.get(process_id)
+            if outcome is None or outcome.status == OutcomeStatus.COMPLETED or not (
+                outcome.retryable or outcome.reason in policy.retryable_reasons
+            ):
+                raise RetryError("outcome_not_retryable")
+            attempts = len({entry.attempt_id for entry in process.history})
+            if attempts >= policy.max_attempts:
+                raise RetryError("retry_exhausted")
+            family = {process_id}
+            while True:
+                expanded = family | {p.process_id for p in self.processes.values() if p.parent_id in family}
+                if expanded == family:
+                    break
+                family = expanded
+            if any(event.process_id in family and (
+                event.type == "workspace.committed" or
+                event.type in ("effect.applying", "effect.applied") and event.payload.get("replay_safe") is not True
+            ) for event in self.events):
+                raise RetryError("unsafe_effect_replay")
+            if policy.backoff_seconds:
+                await asyncio.sleep(policy.backoff_seconds * (2 ** (attempts - 1)))
+            previous = process.attempt_id
+            process.new_attempt()
+            self._persist(process, Event(process_id, "process.retry", {
+                "previous_attempt_id": previous, "attempt_id": process.attempt_id,
+                "attempt_number": attempts + 1, "backoff_seconds": policy.backoff_seconds,
+            }, parent_id=process.parent_id))
+            self.tasks.pop(process_id, None)
+            self.started[process_id] = asyncio.Event()
+            self.start(process_id)
+            return process.attempt_id
+
+    def recover_records(self) -> None:
+        if not isinstance(self.records, ProcessStore):
+            raise ValueError("recovery requires a process store")
+        if self.tasks:
+            raise ValueError("cannot recover over running work")
+        self.processes = {identity: self.records.load(identity) for identity in self.records.list_processes()}
+        self.authority.parents = {p.process_id: p.parent_id for p in self.processes.values()}
+        for process in self.processes.values():
+            self.started[process.process_id] = asyncio.Event()
+            self.locks[process.process_id] = asyncio.Lock()
+        for event in self.events:
+            if event.type in ("capability.issued", "capability.delegated"):
+                raw = event.payload.get("capability")
+                if isinstance(raw, str):
+                    capability = Capability.from_json(raw)
+                    if capability.recipient != event.process_id:
+                        raise ValueError("corrupt capability provenance")
+                    self.authority.grants[capability.capability_id] = capability
+            elif event.type == "capability.revoked":
+                self.authority.revoked.add(event.payload["capability_id"])
+            elif event.type == "process.outcome":
+                self.results[event.process_id] = Outcome.from_json(json.dumps(event.payload))
