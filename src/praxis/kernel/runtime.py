@@ -1,6 +1,8 @@
 """Process-tree orchestration across pluggable executors."""
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 
@@ -8,10 +10,14 @@ from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
 from praxis.kernel.authority import Authority, AuthorizationError
 from praxis.kernel.capabilities import Resource
+from praxis.kernel.contracts import Contract
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
+from praxis.validators.policy import VerificationReport, evaluate
+from praxis.validators.protocol import CheckResult, CheckStatus, ValidationInput, Validator
+from praxis.workspaces.transaction import CanonicalDirectory, WorkspaceTransaction
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import WorkspaceHandle
 
@@ -39,11 +45,14 @@ class Kernel:
     def __init__(
         self, records: ProcessRecords, workspaces: LocalWorkspaces,
         executors: dict[str, Executor], *, retain_workspaces: bool = False,
-        authority: Authority | None = None,
+        authority: Authority | None = None, validators: dict[str, Validator] | None = None,
     ):
         self.records = records
         self.workspaces = workspaces
         self.executors = dict(executors)
+        self.validators = dict(validators or {})
+        self.verification: dict[str, VerificationReport] = {}
+        self.canonical_targets: dict[str, CanonicalDirectory] = {}
         self.retain_workspaces = retain_workspaces
         self.processes: dict[str, Process] = {}
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
@@ -54,7 +63,8 @@ class Kernel:
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
-    def create(self, spec: ProcessSpec, parent_id: str | None = None) -> Process:
+    def create(self, spec: ProcessSpec, parent_id: str | None = None,
+               *, canonical: CanonicalDirectory | None = None) -> Process:
         if parent_id is not None:
             parent = self.processes[parent_id]
             if parent.state in TERMINAL:
@@ -66,6 +76,8 @@ class Kernel:
         self.records.save(process)
         self.authority.configure_process(process.process_id, parent_id)
         self.processes[process.process_id] = process
+        if canonical is not None:
+            self.canonical_targets[process.process_id] = canonical
         self.started[process.process_id] = asyncio.Event()
         self.locks[process.process_id] = asyncio.Lock()
         self.events.append(Event(process.process_id, "process.created", parent_id=parent_id))
@@ -90,6 +102,8 @@ class Kernel:
 
     async def _run(self, process: Process) -> Outcome:
         handle: WorkspaceHandle | None = None
+        transaction: WorkspaceTransaction | None = None
+        verified = False
         try:
             self.authority.require(process.process_id, Resource.EXECUTOR, "execute", process.spec.executor)
             self.authority.require(process.process_id, Resource.WORKSPACE, "create", process.process_id)
@@ -99,6 +113,10 @@ class Kernel:
             else:
                 handle = self.workspaces.create(process.process_id, retain=self.retain_workspaces)
                 self.handles[process.process_id] = handle
+                canonical = self.canonical_targets.get(process.process_id)
+                if canonical is not None:
+                    self.authority.require(process.process_id, Resource.FILESYSTEM, "read", str(canonical.root))
+                    transaction = WorkspaceTransaction(self.workspaces, handle, canonical)
                 request = ExecutionRequest(
                     process.process_id, process.attempt_id, process.spec, handle.workspace_id,
                     self.workspaces.path_for(handle, process.process_id),
@@ -115,10 +133,24 @@ class Kernel:
         except Exception:
             result = Outcome(OutcomeStatus.FAILED, "executor_error")
         self.started[process.process_id].set()
+        try:
+            if result.status == OutcomeStatus.COMPLETED and handle is not None:
+                report = await self._verify(process, handle)
+                verified = report.approved
+                if verified and transaction is not None:
+                    self.authority.require(process.process_id, Resource.WORKSPACE, "commit", process.process_id)
+                    self.authority.require(process.process_id, Resource.FILESYSTEM, "write", str(transaction.canonical.root))
+                    self.events.append(transaction.commit(report))
+            if not verified and transaction is not None:
+                self.events.append(transaction.rollback())
+        except Exception:
+            verified = False
+            result = Outcome(OutcomeStatus.FAILED, "verification_or_commit_error")
+            if transaction is not None and not transaction.committed:
+                self.events.append(transaction.rollback())
         self.results[process.process_id] = result
-        # Nonempty contracts remain unverified until a validator is configured.
         async with self.locks[process.process_id]:
-            self._move(process, result.process_state(verified=not process.spec.contract))
+            self._move(process, result.process_state(verified=verified))
         if handle is not None:
             if self.authority.authorize(process.process_id, Resource.WORKSPACE,
                                         "destroy", process.process_id).allowed:
@@ -201,3 +233,41 @@ class Kernel:
         if result.applied and process_id in self.tasks:
             await asyncio.shield(self.tasks[process_id])
         return results
+
+    async def _verify(self, process: Process, handle: WorkspaceHandle) -> VerificationReport:
+        self.authority.require(process.process_id, Resource.WORKSPACE, "snapshot", process.process_id)
+        snapshot = self.workspaces.snapshot(handle)
+        files: list[tuple[str, bytes]] = []
+        for path, digest in snapshot.files:
+            if path.endswith("/"):
+                continue
+            blob = (self.workspaces.root / "blobs" / digest).read_bytes()
+            if hashlib.sha256(blob).hexdigest() != digest:
+                raise ValueError("corrupt verification snapshot")
+            files.append((path, blob.split(b"\n", 1)[1]))
+        source = ValidationInput(process.process_id, process.attempt_id, snapshot.snapshot_id, tuple(files))
+        contract = Contract.from_json(json.dumps(process.spec.contract))
+        results = []
+        for check in contract.invariants + contract.validators:
+            validator = self.validators.get(check.validator)
+            if validator is None:
+                result = CheckResult(check.check_id, CheckStatus.UNAVAILABLE, "validator_unavailable")
+            else:
+                try:
+                    result = await validator.validate(source, check)
+                    if result.check_id != check.check_id:
+                        raise ValueError("validator identity mismatch")
+                except Exception:
+                    result = CheckResult(check.check_id, CheckStatus.ERROR, "validator_error")
+            results.append(result)
+            self.events.append(Event(process.process_id, "contract.checked", json.loads(result.to_json()),
+                                     parent_id=process.parent_id))
+        report = evaluate(contract, source, tuple(results))
+        self.verification[process.process_id] = report
+        self.events.append(Event(process.process_id, "contract.evaluated", {
+            "approved": report.approved, "snapshot_id": report.snapshot_id,
+            "missing_outputs": list(report.missing_outputs),
+            "required_failures": list(report.required_failures),
+            "advisory_failures": list(report.advisory_failures),
+        }, parent_id=process.parent_id))
+        return report
