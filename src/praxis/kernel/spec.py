@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from praxis.knowledge.dependencies import ContextDependency
 from praxis.kernel.budgets import ResourceBudget
 from praxis.kernel.contracts import Contract
 from praxis.kernel.events import EventError, _validate_json
@@ -35,8 +36,19 @@ class ProcessSpec:
     deadline: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: int = 1
+    context: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        try:
+            if not isinstance(self.context, list):
+                raise ValueError("context must be an array")
+            dependencies = [ContextDependency.from_dict(item) for item in self.context]
+            if len({d.context_id for d in dependencies}) != len(dependencies):
+                raise ValueError("duplicate context identity")
+            if dependencies and "praxis.context" in self.inputs:
+                raise ValueError("reserved context input")
+        except (ValueError, TypeError) as exc:
+            raise SpecError("context", "invalid context dependency") from exc
         for name in ("objective", "executor"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
