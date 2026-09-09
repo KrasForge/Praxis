@@ -6,6 +6,8 @@ from enum import Enum
 
 from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
+from praxis.kernel.authority import Authority, AuthorizationError
+from praxis.kernel.capabilities import Resource
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
@@ -37,6 +39,7 @@ class Kernel:
     def __init__(
         self, records: ProcessRecords, workspaces: LocalWorkspaces,
         executors: dict[str, Executor], *, retain_workspaces: bool = False,
+        authority: Authority | None = None,
     ):
         self.records = records
         self.workspaces = workspaces
@@ -46,7 +49,8 @@ class Kernel:
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
         self.results: dict[str, Outcome] = {}
         self.handles: dict[str, WorkspaceHandle] = {}
-        self.events: list[Event] = []
+        self.authority = authority or Authority()
+        self.events = self.authority.events
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
@@ -60,6 +64,7 @@ class Kernel:
             raise ValueError("capability issuance is not configured")
         process = Process(ProcessSpec.from_json(spec.to_json()), parent_id=parent_id)
         self.records.save(process)
+        self.authority.configure_process(process.process_id)
         self.processes[process.process_id] = process
         self.started[process.process_id] = asyncio.Event()
         self.locks[process.process_id] = asyncio.Lock()
@@ -86,6 +91,8 @@ class Kernel:
     async def _run(self, process: Process) -> Outcome:
         handle: WorkspaceHandle | None = None
         try:
+            self.authority.require(process.process_id, Resource.EXECUTOR, "execute", process.spec.executor)
+            self.authority.require(process.process_id, Resource.WORKSPACE, "create", process.process_id)
             executor = self.executors.get(process.spec.executor)
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
@@ -103,6 +110,8 @@ class Kernel:
                     result = Outcome(OutcomeStatus.UNAVAILABLE, control.reason)
                 else:
                     result = await executor.collect_result(process.attempt_id)
+        except AuthorizationError:
+            result = Outcome(OutcomeStatus.FAILED, "capability_denied")
         except Exception:
             result = Outcome(OutcomeStatus.FAILED, "executor_error")
         self.started[process.process_id].set()
@@ -111,7 +120,9 @@ class Kernel:
         async with self.locks[process.process_id]:
             self._move(process, result.process_state(verified=not process.spec.contract))
         if handle is not None:
-            self.workspaces.cleanup(handle)
+            if self.authority.authorize(process.process_id, Resource.WORKSPACE,
+                                        "destroy", process.process_id).allowed:
+                self.workspaces.cleanup(handle)
         return result
 
     async def join(self, parent_id: str, child_ids: list[str]) -> tuple[ChildOutcome, ...]:
@@ -134,6 +145,11 @@ class Kernel:
         if process_id in self.tasks:
             await self.started[process_id].wait()
         async with self.locks[process_id]:
+            decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+            if not decision.allowed:
+                result = ControlResult(True, False, decision.reason)
+                self._control_event(process, signal.value, result)
+                return result
             required = State.SUSPENDED if signal == ProcessSignal.RESUME else State.RUNNING
             if process.state != required:
                 result = ControlResult(True, False, "invalid_process_state")
@@ -159,6 +175,11 @@ class Kernel:
         if not isinstance(policy, CancellationPolicy):
             raise ValueError("typed cancellation policy required")
         process = self.processes[process_id]
+        decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+        if not decision.allowed:
+            result = ControlResult(True, False, decision.reason)
+            self._control_event(process, "cancel", result)
+            return {process_id: result}
         results: dict[str, ControlResult] = {}
         if policy == CancellationPolicy.TREE:
             children = [p.process_id for p in self.processes.values() if p.parent_id == process_id]
