@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -16,6 +17,7 @@ from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.process import Process, ProcessRecords
 from praxis.kernel.spec import ProcessSpec
 from praxis.kernel.retry import RetryError, RetryPolicy
+from praxis.kernel.usage import UsageLedger
 from praxis.storage.protocol import ProcessStore
 from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
@@ -65,6 +67,7 @@ class Kernel:
         if isinstance(records, ProcessStore):
             self.authority.events = EventJournal(records)
         self.events = self.authority.events
+        self.usage = UsageLedger(self.events)
         self.started: dict[str, asyncio.Event] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
@@ -81,6 +84,7 @@ class Kernel:
         event = Event(process.process_id, "process.created", parent_id=parent_id)
         self._persist(process, event)
         self.authority.configure_process(process.process_id, parent_id)
+        self.usage.register(process.process_id, parent_id)
         self.processes[process.process_id] = process
         if canonical is not None:
             self.canonical_targets[process.process_id] = canonical
@@ -105,6 +109,7 @@ class Kernel:
                                      parent_id=process.parent_id))
 
     async def _run(self, process: Process) -> Outcome:
+        started_at = time.monotonic()
         handle: WorkspaceHandle | None = None
         transaction: WorkspaceTransaction | None = None
         verified = False
@@ -152,6 +157,9 @@ class Kernel:
             result = Outcome(OutcomeStatus.FAILED, "verification_or_commit_error")
             if transaction is not None and not transaction.committed:
                 self.events.append(transaction.rollback())
+        self.usage.record(process.process_id, process.attempt_id, f"{process.attempt_id}:wall", {
+            "wall_milliseconds": int((time.monotonic() - started_at) * 1000),
+        })
         self.results[process.process_id] = result
         self.events.append(Event(process.process_id, "process.outcome", json.loads(result.to_json()),
                                  parent_id=process.parent_id))
@@ -330,6 +338,7 @@ class Kernel:
             raise ValueError("cannot recover over running work")
         self.processes = {identity: self.records.load(identity) for identity in self.records.list_processes()}
         self.authority.parents = {p.process_id: p.parent_id for p in self.processes.values()}
+        self.usage.parents = dict(self.authority.parents)
         for process in self.processes.values():
             self.started[process.process_id] = asyncio.Event()
             self.locks[process.process_id] = asyncio.Lock()
@@ -343,5 +352,8 @@ class Kernel:
                     self.authority.grants[capability.capability_id] = capability
             elif event.type == "capability.revoked":
                 self.authority.revoked.add(event.payload["capability_id"])
+            elif event.type == "usage.recorded":
+                self.usage.record(event.process_id, event.payload["attempt_id"], event.payload["usage_id"],
+                                  event.payload["values"], emit=False)
             elif event.type == "process.outcome":
                 self.results[event.process_id] = Outcome.from_json(json.dumps(event.payload))
