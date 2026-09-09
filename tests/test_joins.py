@@ -35,3 +35,24 @@ def test_mixed_child_join_policies(tmp_path, policy, quorum, expected):
         assert (await join_children(kernel, parent.process_id, children,
                                     failure_policy=ChildFailurePolicy.FAIL_FAST)).status == "failed"
     asyncio.run(exercise())
+
+
+def test_join_retries_transient_child(tmp_path):
+    class Flaky(FakeExecutor):
+        calls = 0
+
+        async def start(self, request):
+            self.calls += 1
+            self.outcome = (Outcome(OutcomeStatus.FAILED, "transient", retryable=True)
+                            if self.calls == 1 else Outcome(OutcomeStatus.COMPLETED, "done"))
+            return await super().start(request)
+
+    async def exercise():
+        kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"),
+                        {"fake": Flaky()}, authority=Authority(execution_defaults=frozenset({"fake"})))
+        parent = kernel.create(ProcessSpec("parent", "fake"))
+        child = kernel.spawn(parent.process_id, ProcessSpec("child", "fake"))
+        report = await join_children(kernel, parent.process_id, (child,), failure_policy=ChildFailurePolicy.RETRY)
+        assert report.status == "completed"
+        assert len({entry.attempt_id for entry in kernel.processes[child].history}) == 2
+    asyncio.run(exercise())
