@@ -57,6 +57,7 @@ class Kernel:
         self.records = records
         self.workspaces = workspaces
         self.executors = dict(executors)
+        self.assignments: dict[str, str] = {}
         self.validators = dict(validators or {})
         self.verification: dict[str, VerificationReport] = {}
         self.canonical_targets: dict[str, CanonicalDirectory] = {}
@@ -118,9 +119,9 @@ class Kernel:
         transaction: WorkspaceTransaction | None = None
         verified = False
         try:
-            self.authority.require(process.process_id, Resource.EXECUTOR, "execute", process.spec.executor)
+            self.authority.require(process.process_id, Resource.EXECUTOR, "execute", self.executor_name(process))
             self.authority.require(process.process_id, Resource.WORKSPACE, "create", process.process_id)
-            executor = self.executors.get(process.spec.executor)
+            executor = self.executors.get(self.executor_name(process))
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
             elif "resource_reporting" not in executor.descriptor.features and any(
@@ -212,7 +213,7 @@ class Kernel:
         if process_id in self.tasks:
             await self.started[process_id].wait()
         async with self.locks[process_id]:
-            decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+            decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", self.executor_name(process))
             if not decision.allowed:
                 result = ControlResult(True, False, decision.reason)
                 self._control_event(process, signal.value, result)
@@ -221,7 +222,7 @@ class Kernel:
             if process.state != required:
                 result = ControlResult(True, False, "invalid_process_state")
             else:
-                result = await self.executors[process.spec.executor].signal(
+                result = await self.executors[self.executor_name(process)].signal(
                     process.attempt_id, signal.value
                 )
                 if result.applied and signal in (ProcessSignal.SUSPEND, ProcessSignal.RESUME):
@@ -242,7 +243,7 @@ class Kernel:
         if not isinstance(policy, CancellationPolicy):
             raise ValueError("typed cancellation policy required")
         process = self.processes[process_id]
-        decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+        decision = self.authority.authorize(process_id, Resource.EXECUTOR, "control", self.executor_name(process))
         if not decision.allowed:
             result = ControlResult(True, False, decision.reason)
             self._control_event(process, "cancel", result)
@@ -263,7 +264,7 @@ class Kernel:
                 self.budgets.release(process_id)
                 result = ControlResult(True, True, "cancelled")
             else:
-                result = await self.executors[process.spec.executor].cancel(process.attempt_id)
+                result = await self.executors[self.executor_name(process)].cancel(process.attempt_id)
             self._control_event(process, "cancel", result)
             results[process_id] = result
         if result.applied and process_id in self.tasks:
@@ -317,7 +318,7 @@ class Kernel:
 
     async def retry(self, process_id: str, policy: RetryPolicy) -> str:
         process = self.processes[process_id]
-        self.authority.require(process_id, Resource.EXECUTOR, "control", process.spec.executor)
+        self.authority.require(process_id, Resource.EXECUTOR, "control", self.executor_name(process))
         async with self.locks[process_id]:
             if process.state != State.FAILED:
                 raise RetryError("process_not_failed")
@@ -392,3 +393,6 @@ class Kernel:
         if previous is None:
             self.budgets.check(process_id, values)
         self.usage.record(process_id, attempt_id, usage_id, values)
+
+    def executor_name(self, process: Process) -> str:
+        return self.assignments.get(process.process_id, process.spec.executor)
