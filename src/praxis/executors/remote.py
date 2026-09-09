@@ -20,8 +20,10 @@ from praxis.workspaces.protocol import WorkspaceHandle
 
 class RemoteExecutor(FakeExecutor):
     def __init__(self, worker: Worker, executor: str, workspaces: LocalWorkspaces,
-                 transport: JSONTransport, event_sink: Callable[[Event], None] | None = None):
+                 transport: JSONTransport, event_sink: Callable[[Event], None] | None = None,
+                 features: frozenset[str] = frozenset()):
         super().__init__()
+        self.control_features = features & {"cancel"}
         self.worker = worker
         self.executor = executor
         self.workspaces = workspaces
@@ -30,12 +32,17 @@ class RemoteExecutor(FakeExecutor):
         self.dispatches: dict[str, Dispatch] = {}
         self.cursors: dict[str, int] = {}
         self.events: list[Event] = []
+        self.result_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def descriptor(self) -> ExecutorFeatures:
-        return ExecutorFeatures("remote", frozenset({"streaming"}))
+        return ExecutorFeatures("remote", frozenset({"streaming"}) | self.control_features)
 
     async def start(self, request: ExecutionRequest) -> ControlResult:
+        if request.attempt_id in self.requests:
+            if self.requests[request.attempt_id] != request:
+                return ControlResult(True, False, "identity_conflict")
+            return await self.reconnect(request.attempt_id)
         handle = WorkspaceHandle(request.workspace_id, request.process_id, "local")
         if self.workspaces.path_for(handle, request.process_id) != request.workspace_path.resolve():
             return ControlResult(True, False, "workspace_mismatch")
@@ -43,17 +50,34 @@ class RemoteExecutor(FakeExecutor):
                             request.attempt_id, self.executor, request.spec.to_json(),
                             WorkspaceBundle.capture(self.workspaces, handle).to_json(),
                             request.lineage_json or Lineage(request.process_id, request.attempt_id).to_json(), request.parent_id)
+        self.requests[request.attempt_id] = request
+        self.dispatches[request.attempt_id] = dispatch
+        event = Event(request.process_id, "worker.dispatch_pending", {"attempt_id": request.attempt_id,
+                      "worker_id": self.worker.worker_id, "execution_id": dispatch.execution_id,
+                      "lineage": dispatch.lineage_json}, parent_id=request.parent_id)
+        self.events.append(event)
+        if self.event_sink:
+            self.event_sink(event)
+        return await self.reconnect(request.attempt_id)
+
+    async def reconnect(self, attempt_id: str) -> ControlResult:
+        dispatch = self.dispatches.get(attempt_id)
+        if dispatch is None:
+            return ControlResult(True, False, "attempt_not_found")
         try:
             reply = await self.transport.request("POST", "/v1/worker", {"operation": "dispatch", "dispatch": json.loads(dispatch.to_json())})
             if reply.get("accepted") is not True or reply.get("execution_id") != dispatch.execution_id:
                 return ControlResult(True, False, "remote_dispatch_rejected")
         except TransportError:
-            return ControlResult(True, False, "remote_transport_unavailable")
-        self.requests[request.attempt_id] = request
-        self.dispatches[request.attempt_id] = dispatch
+            # The worker may have accepted the dispatch before the acknowledgement was lost.
+            return ControlResult(True, True, "remote_dispatch_uncertain")
         return ControlResult(True, True, "duplicate" if reply.get("duplicate") else "started")
 
     async def collect_result(self, attempt_id: str) -> Outcome:
+        async with self.result_locks.setdefault(attempt_id, asyncio.Lock()):
+            return await self._collect_result(attempt_id)
+
+    async def _collect_result(self, attempt_id: str) -> Outcome:
         if attempt_id in self.results:
             return self.results[attempt_id]
         if attempt_id not in self.dispatches:
@@ -78,6 +102,8 @@ class RemoteExecutor(FakeExecutor):
                     if self.event_sink:
                         self.event_sink(event)
                     self.cursors[attempt_id] = entry["cursor"]
+                if reply.get("orphaned") is True:
+                    return Outcome(OutcomeStatus.PARTIAL, "remote_execution_orphaned")
                 if reply["result"] is not None:
                     result = reply["result"]
                     outcome = Outcome.from_json(json.dumps(result["outcome"]))
@@ -89,9 +115,27 @@ class RemoteExecutor(FakeExecutor):
                     return outcome
                 await asyncio.sleep(0.05)
         except TransportError:
-            return Outcome(OutcomeStatus.UNAVAILABLE, "remote_transport_unavailable")
+            return Outcome(OutcomeStatus.PARTIAL, "remote_transport_unavailable")
         except (ValueError, TypeError, KeyError):
             return Outcome(OutcomeStatus.FAILED, "remote_protocol_error")
 
     async def cancel(self, attempt_id: str) -> ControlResult:
-        return ControlResult(False, False, "cancel_unavailable")
+        if "cancel" not in self.control_features:
+            return ControlResult(False, False, "cancel_unavailable")
+        dispatch = self.dispatches.get(attempt_id)
+        if dispatch is None:
+            return ControlResult(True, False, "attempt_not_found")
+        try:
+            reply = await self.transport.request("POST", "/v1/worker", {
+                "operation": "cancel", "execution_id": dispatch.execution_id,
+                "attempt_id": attempt_id, "generation": self.worker.generation})
+            if any(type(reply.get(k)) is not bool for k in ("supported", "applied")):
+                raise ValueError("invalid remote control")
+            control = ControlResult(**reply)
+            if control.applied:
+                await self.collect_result(attempt_id)
+            return control
+        except TransportError:
+            return ControlResult(True, False, "remote_transport_unavailable")
+        except (ValueError, TypeError):
+            return ControlResult(True, False, "remote_protocol_error")

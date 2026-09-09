@@ -375,6 +375,12 @@ class Kernel:
                 family = expanded
             durable_events = (tuple(entry.event for entry in self.records.read_events())
                               if isinstance(self.records, ProcessStore) else tuple(self.events))
+            pending_remote = {(event.process_id, event.payload.get("attempt_id")) for event in durable_events
+                              if event.process_id in family and event.type == "worker.dispatch_pending"}
+            completed_remote = {(event.process_id, event.payload.get("attempt_id")) for event in durable_events
+                                if event.type in {"worker.execution_completed", "worker.execution_fenced"}}
+            if pending_remote - completed_remote:
+                raise RetryError("unsafe_remote_replay")
             if any(event.process_id in family and (
                 event.type == "workspace.committed" or
                 event.type in ("effect.applying", "effect.applied") and event.payload.get("replay_safe") is not True
