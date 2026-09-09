@@ -11,6 +11,7 @@ from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ExecutionRequest, Executor
 from praxis.kernel.events import Event
 from praxis.kernel.spec import ProcessSpec
+from praxis.observability.tracing import TraceContext
 from praxis.remote.bundle import WorkspaceBundle
 from praxis.remote.dispatch import Dispatch
 from praxis.remote.workers import Worker, WorkerError
@@ -97,7 +98,8 @@ class WorkerNode:
     def _event(self, dispatch: Dispatch, kind: str) -> Event:
         return Event(dispatch.process_id, kind, {"attempt_id": dispatch.attempt_id,
                      "worker_id": self.worker.worker_id, "generation": self.worker.generation,
-                     "lineage": dispatch.lineage_json}, parent_id=dispatch.parent_id)
+                     "lineage": dispatch.lineage_json, "trace": None if dispatch.trace_json is None else
+                     json.loads(TraceContext.from_json(dispatch.trace_json).child("worker", dispatch.execution_id).to_json())}, parent_id=dispatch.parent_id)
 
     async def _run(self, dispatch: Dispatch) -> None:
         handle = None
@@ -108,7 +110,7 @@ class WorkerNode:
             spec = replace(ProcessSpec.from_json(dispatch.spec_json), executor=dispatch.executor)
             request = ExecutionRequest(dispatch.process_id, dispatch.attempt_id, spec, handle.workspace_id,
                                        self.workspaces.path_for(handle, dispatch.process_id),
-                                       parent_id=dispatch.parent_id, lineage_json=dispatch.lineage_json)
+                                       parent_id=dispatch.parent_id, lineage_json=dispatch.lineage_json, trace_json=dispatch.trace_json)
             event = self._event(dispatch, "worker.execution_started")
             with self.store._transaction() as connection:
                 connection.execute("INSERT INTO remote_events(execution_id,body) VALUES(?,?)", (dispatch.execution_id, event.to_json()))
