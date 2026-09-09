@@ -47,6 +47,14 @@ class Checkpoint:
     payload: bytes
     protocol_version: int = 1
 
+    def __post_init__(self) -> None:
+        if any(not isinstance(v, str) or not v or "\x00" in v for v in (self.executor, self.process_id, self.attempt_id)):
+            raise ValueError("invalid_checkpoint_identity")
+        if type(self.protocol_version) is not int or self.protocol_version != 1:
+            raise ValueError("unsupported_checkpoint_version")
+        if not isinstance(self.payload, bytes) or len(self.payload) > 16777216:
+            raise ValueError("invalid_checkpoint_payload")
+
 
 @dataclass(frozen=True)
 class CheckpointResult:

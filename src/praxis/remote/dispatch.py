@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from uuid import NAMESPACE_URL, uuid5
 
 from praxis.kernel.lineage import Lineage
+from praxis.kernel.parsing import load_object
 from praxis.kernel.spec import ProcessSpec
 from praxis.observability.tracing import TraceContext
 from praxis.remote.bundle import WorkspaceBundle
@@ -52,6 +53,6 @@ class Dispatch:
     @classmethod
     def from_json(cls, raw: str) -> "Dispatch":
         try:
-            return cls(**json.loads(raw))
+            return cls(**load_object(raw))
         except (TypeError, ValueError, KeyError) as exc:
             raise ValueError("invalid_dispatch") from exc
