@@ -126,7 +126,7 @@ class RemoteExecutor(FakeExecutor):
                 await asyncio.sleep(0.05)
         except TransportError:
             return Outcome(OutcomeStatus.PARTIAL, "remote_transport_unavailable")
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             return Outcome(OutcomeStatus.FAILED, "remote_protocol_error")
 
     async def cancel(self, attempt_id: str) -> ControlResult:
