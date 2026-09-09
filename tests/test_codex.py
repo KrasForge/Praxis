@@ -11,7 +11,7 @@ from praxis.workspaces.local import LocalWorkspaces
 def test_codex_mapping(tmp_path):
     workspaces = LocalWorkspaces(tmp_path)
     authority = Authority()
-    adapter = CodexExecutor(workspaces, authority)
+    adapter = CodexExecutor(workspaces, authority, isolated_worker=True)
     request = ExecutionRequest("process", "attempt", ProcessSpec(
         objective="explain", executor="codex", inputs={"text": "a; $(bad)"},
         metadata={"codex": {"model": "example"}}), "workspace", tmp_path)
@@ -50,7 +50,7 @@ def test_codex_stream_fixtures(tmp_path):
                 "printf '%s\\n' '" + json.dumps(event) + "'" for event in events))
             executable.chmod(0o700)
             handle = provider.create("p")
-            adapter = CodexExecutor(provider, authority, str(executable))
+            adapter = CodexExecutor(provider, authority, str(executable), isolated_worker=True)
             request = ExecutionRequest("p", str(index), ProcessSpec("task", "codex"),
                                        handle.workspace_id, provider.path_for(handle, "p"))
             assert (await adapter.start(request)).applied
@@ -75,7 +75,7 @@ def test_codex_controls(tmp_path):
         executable = tmp_path / "codex-fixture"
         executable.write_text("#!/bin/sh\ncat >/dev/null\nsleep 60\n")
         executable.chmod(0o700)
-        adapter = CodexExecutor(provider, authority, str(executable))
+        adapter = CodexExecutor(provider, authority, str(executable), isolated_worker=True)
         handle = provider.create("p")
         request = ExecutionRequest("p", "a", ProcessSpec("wait", "codex"),
                                    handle.workspace_id, provider.path_for(handle, "p"))

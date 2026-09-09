@@ -23,7 +23,7 @@ def test_claude_sdk_fixture(tmp_path):
         sdk = SimpleNamespace(query=query, ClaudeAgentOptions=lambda **kw: kw, ResultMessage=Result)
         provider = LocalWorkspaces(tmp_path)
         authority = Authority()
-        adapter = ClaudeExecutor(provider, authority, sdk)
+        adapter = ClaudeExecutor(provider, authority, sdk, isolated_worker=True)
         handle = provider.create("p")
         request = ExecutionRequest("p", "a", ProcessSpec("task", "claude"),
                                    handle.workspace_id, provider.path_for(handle, "p"))

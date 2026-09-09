@@ -1,0 +1,11 @@
+# Execution isolation
+
+LocalProcessExecutor defaults to LinuxIsolation. ShellExecutor and CommandValidator inherit that policy. Bubblewrap must be installed and permitted to create user namespaces; otherwise execution fails, with no fallback to native host access. CI installs Bubblewrap on disposable Ubuntu runners and enables their user namespaces. Other operating systems require a dedicated Linux worker or an independently qualified executor.
+
+The sandbox uses an empty root, separate user/PID/network/IPC/UTS namespaces, dropped capabilities, private proc/dev/tmp, and a writable bind of only the process workspace. Read-only runtime mounts default to /usr, /bin, /lib, /lib64 and the host Python base installation. These are explicitly trusted runtime images, not arbitrary argv-derived mounts. Hosts can supply narrower `LinuxIsolation(runtime_roots=...)`; never include private data or a parent of the workspace. Python virtualenv launchers resolve to the mounted base interpreter. Extra packages and tools must be included in a host-approved runtime image.
+
+Subprocesses receive only the declared environment plus authorized provider values. They inherit pipes, not a terminal; the launcher creates a new session. Workspace symlinks cannot reveal files absent from the mount namespace, and snapshot/import validation rejects unsafe links. The host must not concurrently replace provider metadata or mounted runtime roots.
+
+Codex, Claude and DeepSeek adapters require `isolated_worker=True`, a trusted host assertion that the worker is independently confined. This flag does not create a sandbox. Mount only that worker's current workspace and approved runtime/resources, with provider-specific network policy and credentials. LocalProcessExecutor's `isolation=None` is reserved for trusted code or an already isolated host; it does not advertise isolation. Untrusted specs cannot set either host option.
+
+Namespaces limit visibility and network access. They do not impose memory, disk, PID-count or CPU quotas; use cgroups and filesystem quotas for those limits. See TM-3/TM-9 and [Bubblewrap's security model](https://github.com/containers/bubblewrap#sandbox-security). A compromised OS kernel or installed Python adapter remains outside the trust boundary.

@@ -4,9 +4,12 @@ import asyncio
 import math
 import os
 import signal
+import shutil
+from pathlib import Path
 
 from praxis.kernel.secrets import SecretAccess
 from praxis.kernel.authority import AuthorizationError
+from praxis.executors.isolation import LinuxIsolation
 from praxis.executors.fake import FakeExecutor
 from praxis.executors.features import ExecutorFeatures
 from praxis.executors.outcomes import Outcome, OutcomeStatus
@@ -17,9 +20,11 @@ from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
 
 class LocalProcessExecutor(FakeExecutor):
     def __init__(self, workspaces: LocalWorkspaces, *, secrets: SecretAccess | None = None,
-                 secret_bindings: dict[str, str] | None = None):
+                 secret_bindings: dict[str, str] | None = None,
+                 isolation: LinuxIsolation | None = LinuxIsolation()):
         super().__init__()
         self.workspaces = workspaces
+        self.isolation = isolation
         self.secrets = secrets
         self.secret_bindings = dict(secret_bindings or {})
         if self.secret_bindings and secrets is None:
@@ -32,6 +37,8 @@ class LocalProcessExecutor(FakeExecutor):
     @property
     def descriptor(self) -> ExecutorFeatures:
         features = {"cancel"}
+        if self.isolation is not None:
+            features.add("isolation")
         if os.name == "posix":
             features.update({"signal", "suspend"})
         return ExecutorFeatures("local", frozenset(features))
@@ -59,6 +66,10 @@ class LocalProcessExecutor(FakeExecutor):
                     type(timeout) not in (float, int) or not math.isfinite(timeout) or timeout <= 0
                 ):
                     return ControlResult(True, False, "invalid_timeout")
+                if not (Path(argv[0]).is_file() if "/" in argv[0] else shutil.which(argv[0])):
+                    return ControlResult(True, False, "executor_unavailable")
+                if self.isolation is not None:
+                    argv = self.isolation.command(argv, path)
                 environment = dict(request.spec.environment)
                 if self.secrets is not None:
                     environment.update(self.secrets.environment(request.process_id, self.secret_bindings))

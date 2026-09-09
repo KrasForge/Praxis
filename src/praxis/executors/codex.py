@@ -21,8 +21,10 @@ from praxis.workspaces.local import LocalWorkspaces
 
 class CodexExecutor(LocalProcessExecutor):
     def __init__(self, workspaces: LocalWorkspaces, authority: Authority,
-                 executable: str = "codex", event_sink: Callable[[Event], None] | None = None):
-        super().__init__(workspaces)
+                 executable: str = "codex", event_sink: Callable[[Event], None] | None = None,
+                 *, isolated_worker: bool = False):
+        super().__init__(workspaces, isolation=None)
+        self.isolated_worker = isolated_worker
         self.authority = authority
         self.executable = executable
         self.events: list[Event] = []
@@ -60,6 +62,8 @@ class CodexExecutor(LocalProcessExecutor):
             request.process_id, Resource.EXECUTOR, "execute", "codex"
         ).allowed:
             return ControlResult(True, False, "codex_capability_denied")
+        if self.isolated_worker is not True:
+            return ControlResult(True, False, "isolation_required")
         try:
             mapped = self.map_request(request)
         except ValueError:

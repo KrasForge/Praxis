@@ -57,9 +57,9 @@ def test_adapter_conformance(tmp_path, name):
             "remote": RemoteExecutor(worker, "fake", provider, Transport()),
             "fake": FakeExecutor(), "local": LocalProcessExecutor(provider),
             "shell": ShellExecutor(provider, authority),
-            "codex": CodexExecutor(provider, authority, str(executable)),
+            "codex": CodexExecutor(provider, authority, str(executable), isolated_worker=True),
             "claude": ClaudeExecutor(provider, authority, SimpleNamespace(
-                query=query, ResultMessage=Result, ClaudeAgentOptions=lambda **kw: kw)),
+                query=query, ResultMessage=Result, ClaudeAgentOptions=lambda **kw: kw), isolated_worker=True),
             "deepseek": DeepSeekExecutor(provider, authority, tmp_path / "homes",
                                          isolated_worker=True, sdk=SimpleNamespace(DeepSeekHarness=Harness)),
         }
@@ -107,8 +107,8 @@ def test_claude_to_codex_fallback(tmp_path, transport_error):
                 raise ImportError("missing optional dependency")
             sdk.ClaudeAgentOptions = unavailable
         kernel = Kernel(ProcessRecords(tmp_path / "records"), provider, {
-            "claude": ClaudeExecutor(provider, authority, sdk),
-            "codex": CodexExecutor(provider, authority, str(executable)),
+            "claude": ClaudeExecutor(provider, authority, sdk, isolated_worker=True),
+            "codex": CodexExecutor(provider, authority, str(executable), isolated_worker=True),
         }, authority=authority)
         process = kernel.create(ProcessSpec("task", "claude", metadata={"lineage_label": "original"}))
         original = process.spec.to_json()
