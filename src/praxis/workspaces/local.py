@@ -1,12 +1,15 @@
 """Local directory workspaces. This provider is not an OS process sandbox."""
 
+import hashlib
 import json
+import os
+import stat
 import shutil
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from praxis.workspaces.protocol import (
-    Snapshot, UnsupportedWorkspaceOperation, WorkspaceDiff, WorkspaceError,
+    Snapshot, WorkspaceDiff, WorkspaceError,
     WorkspaceHandle, WorkspaceInfo,
 )
 
@@ -37,7 +40,7 @@ class LocalWorkspaces:
     def inspect(self, handle: WorkspaceHandle) -> WorkspaceInfo:
         self.path_for(handle, handle.process_id)
         record = json.loads((self.records / f"{handle.workspace_id}.json").read_text())
-        return WorkspaceInfo(handle, record["retain"], frozenset())
+        return WorkspaceInfo(handle, record["retain"], frozenset({"snapshot", "diff"}))
 
     def path_for(self, handle: WorkspaceHandle, process_id: str) -> Path:
         try:
@@ -55,10 +58,58 @@ class LocalWorkspaces:
             raise WorkspaceError("invalid or unavailable workspace") from exc
 
     def snapshot(self, handle: WorkspaceHandle) -> Snapshot:
-        raise UnsupportedWorkspaceOperation("snapshot")
+        path = self.path_for(handle, handle.process_id)
+        blobs = self.root / "blobs"
+        blobs.mkdir(exist_ok=True, mode=0o700)
+        entries: list[tuple[str, str]] = []
+        for item in sorted(path.rglob("*")):
+            metadata = item.lstat()
+            if item.is_symlink() or not item.resolve().is_relative_to(path):
+                raise WorkspaceError("snapshot cannot contain symlinks")
+            relative = item.relative_to(path).as_posix()
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                content = b"directory"
+                relative += "/"
+            elif stat.S_ISREG(metadata.st_mode):
+                descriptor = os.open(item, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as stream:
+                    content = stream.read()
+                    after = os.fstat(stream.fileno())
+                if (metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != (
+                    after.st_ino, after.st_size, after.st_mtime_ns
+                ):
+                    raise WorkspaceError("workspace changed during snapshot")
+            else:
+                raise WorkspaceError("snapshot cannot contain special files")
+            blob = str(mode).encode() + b"\n" + content
+            digest = hashlib.sha256(blob).hexdigest()
+            target = blobs / digest
+            if not target.exists():
+                target.write_bytes(blob)
+            entries.append((relative, digest))
+        manifest = json.dumps(entries, separators=(",", ":")).encode()
+        identity = hashlib.sha256(manifest).hexdigest()
+        snapshots = self.root / "snapshots"
+        snapshots.mkdir(exist_ok=True, mode=0o700)
+        (snapshots / identity).write_bytes(manifest)
+        return Snapshot(handle.workspace_id, identity, tuple(entries))
 
     def diff(self, handle: WorkspaceHandle, baseline: Snapshot) -> WorkspaceDiff:
-        raise UnsupportedWorkspaceOperation("diff")
+        if baseline.workspace_id != handle.workspace_id:
+            raise WorkspaceError("snapshot workspace mismatch")
+        expected = hashlib.sha256(json.dumps(
+            baseline.files, separators=(",", ":")
+        ).encode()).hexdigest()
+        if expected != baseline.snapshot_id:
+            raise WorkspaceError("corrupt snapshot")
+        before = dict(baseline.files)
+        after = dict(self.snapshot(handle).files)
+        return WorkspaceDiff(
+            tuple(sorted(after.keys() - before.keys())),
+            tuple(sorted(k for k in before.keys() & after.keys() if before[k] != after[k])),
+            tuple(sorted(before.keys() - after.keys())),
+        )
 
     def destroy(self, handle: WorkspaceHandle) -> None:
         path = self.path_for(handle, handle.process_id)
