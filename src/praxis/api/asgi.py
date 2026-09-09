@@ -37,7 +37,7 @@ class Application:
         try:
             parts = scope["path"].strip("/").split("/")
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
-            action = ("submit" if scope["method"] == "POST" and parts == ["v1", "processes"] else
+            action = ("health" if parts == ["v1", "health"] else "submit" if scope["method"] == "POST" and parts == ["v1", "processes"] else
                       "inspect" if len(parts) < 4 else parts[3])
             identity = parts[2] if len(parts) >= 3 and parts[:2] == ["v1", "processes"] else None
             try:
@@ -99,6 +99,8 @@ class Application:
         await send({"type": "http.response.body", "body": raw})
 
     async def route(self, method: str, path: str, data: dict[str, Any], key: str | None, actor: Actor) -> tuple[int, dict[str, Any]]:
+        if method == "GET" and path == "/v1/health":
+            return 200, self.service.health.snapshot()
         if method == "POST" and path == "/v1/processes":
             result = self.service.submit(data, key, actor=actor.identity)
             return (200 if result["duplicate"] else 202), result

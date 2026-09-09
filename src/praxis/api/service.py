@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from typing import Any
 
+from praxis.observability.health import RuntimeHealth
 from praxis.kernel.lifecycle import TERMINAL
 from praxis.kernel.effect_service import EffectService
 from praxis.kernel.events import Event
@@ -28,9 +29,11 @@ class APIError(ValueError):
 
 
 class ControlPlane:
-    def __init__(self, kernel: Kernel, effects: EffectService | None = None):
+    def __init__(self, kernel: Kernel, effects: EffectService | None = None,
+                 health: RuntimeHealth | None = None):
         self.effects = effects
         self.kernel = kernel
+        self.health = health or RuntimeHealth(kernel)
         self.operation_locks: dict[str, asyncio.Lock] = {}
 
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *, actor: str = "kernel") -> dict[str, Any]:
@@ -79,6 +82,7 @@ class ControlPlane:
                     if p.parent_id == process_id), "spec": json.loads(process.spec.to_json()),
                 "result": result, "verification": None if report is None else json.loads(json.dumps(asdict(report))),
                 "effects": list(effects.values()), "usage": self.kernel.usage.total(process_id),
+                "blocking_reason": self.health.blocking_reason(process_id),
                 "last_event": None if not history else json.loads(history[-1].to_json()),
                 "recovery": next((e.payload for e in reversed(history) if e.type == "process.recovery"), None)}
 
