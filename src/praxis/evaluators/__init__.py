@@ -1,0 +1,1 @@
+"""Immutable candidate evaluation contracts."""
