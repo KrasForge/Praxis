@@ -5,9 +5,11 @@ import hashlib
 import json
 import time
 from uuid import uuid4
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 
+from praxis.knowledge.context import ContextProvider, ContextResponse, bound_response
+from praxis.knowledge.dependencies import ContextDependency, RequiredContextUnavailable
 from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest, Executor
 from praxis.kernel.allocation import BudgetExceeded, BudgetManager
@@ -57,7 +59,9 @@ class Kernel:
         self, records: ProcessRecords | ProcessStore, workspaces: LocalWorkspaces,
         executors: dict[str, Executor], *, retain_workspaces: bool = False,
         authority: Authority | None = None, validators: dict[str, Validator] | None = None,
+        context_providers: dict[str, ContextProvider] | None = None,
     ):
+        self.context_providers = dict(context_providers or {})
         self.records = records
         self.workspaces = workspaces
         self.executors = dict(executors)
@@ -128,6 +132,8 @@ class Kernel:
         try:
             self.authority.require(process.process_id, Resource.EXECUTOR, "execute", self.executor_name(process))
             self.authority.require(process.process_id, Resource.WORKSPACE, "create", process.process_id)
+            context = await self._resolve_context(process)
+            execution_spec = replace(process.spec, context=[], inputs={**process.spec.inputs, "praxis.context": context}) if process.spec.context else process.spec
             executor = self.executors.get(self.executor_name(process))
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
@@ -144,7 +150,7 @@ class Kernel:
                     self.authority.require(process.process_id, Resource.FILESYSTEM, "read", str(canonical.root))
                     transaction = WorkspaceTransaction(self.workspaces, handle, canonical)
                 request = ExecutionRequest(
-                    process.process_id, process.attempt_id, process.spec, handle.workspace_id,
+                    process.process_id, process.attempt_id, execution_spec, handle.workspace_id,
                     self.workspaces.path_for(handle, process.process_id),
                 )
                 self._move(process, State.RUNNING)
@@ -172,6 +178,8 @@ class Kernel:
                     except TimeoutError:
                         await executor.cancel(process.attempt_id)
                         result = Outcome(OutcomeStatus.BUDGET_EXHAUSTED, "wall_budget_exhausted")
+        except RequiredContextUnavailable:
+            result = Outcome(OutcomeStatus.UNAVAILABLE, "required_context_unavailable")
         except AuthorizationError:
             result = Outcome(OutcomeStatus.FAILED, "capability_denied")
         except Exception:
@@ -443,3 +451,28 @@ class Kernel:
         return ProcessResult(process_id, process.attempt_id, process.state, self.results[process_id],
                              verification=self.verification.get(process_id), effects=tuple(effects.values()),
                              usage=self.usage.total(process_id))
+
+    async def _resolve_context(self, process: Process) -> dict[str, object]:
+        resolved: dict[str, object] = {}
+        for raw in process.spec.context:
+            dependency = ContextDependency.from_dict(raw)
+            provider = self.context_providers.get(dependency.provider)
+            response = ContextResponse("unavailable", reason="provider_not_found")
+            if provider is not None:
+                try:
+                    response = bound_response(dependency.request, await asyncio.wait_for(
+                        provider.query(dependency.request), 15))
+                except Exception:
+                    response = ContextResponse("unavailable", reason="context_provider_error")
+            previous = next((e.event_id for e in reversed(self.events) if e.process_id == process.process_id), None)
+            payload = json.loads(json.dumps(asdict(response)))
+            self.events.append(Event(process.process_id, "context.resolved", {
+                "context_id": dependency.context_id, "provider": dependency.provider,
+                "required": dependency.required, "response": payload,
+                "lineage": Lineage(process.process_id, process.attempt_id,
+                                   () if previous is None else (previous,)).to_json(),
+            }, parent_id=process.parent_id))
+            resolved[dependency.context_id] = payload
+            if dependency.required and (response.status == "unavailable" or not response.items):
+                raise RequiredContextUnavailable(dependency.context_id)
+        return resolved
