@@ -25,6 +25,7 @@ class Authority:
         self.grants: dict[str, Capability] = {}
         self.events: list[Event] = []
         self.parents: dict[str, str | None] = {}
+        self.revoked: set[str] = set()
 
     def configure_process(self, process_id: str, parent_id: str | None = None) -> None:
         if process_id in self.parents:
@@ -55,14 +56,14 @@ class Authority:
         *, byte_count: int | None = None,
     ) -> Decision:
         decision = Decision(False, "no_matching_capability")
-        current = datetime.fromisoformat(now())
         for capability in sorted(self.grants.values(), key=lambda cap: cap.capability_id):
             if capability.recipient != recipient or capability.resource != resource:
                 continue
             if action not in capability.actions or not scope_contains(resource, capability.scope, target):
                 continue
-            if capability.expires_at is not None and datetime.fromisoformat(capability.expires_at) <= current:
-                decision = Decision(False, "capability_expired")
+            invalid = self._invalid_chain(capability)
+            if invalid is not None:
+                decision = Decision(False, invalid)
                 continue
             if capability.max_bytes is not None and (
                 type(byte_count) is not int or byte_count < 0 or byte_count > capability.max_bytes
@@ -92,8 +93,9 @@ class Authority:
             raise AuthorizationError("unknown_parent_capability")
         if child_id not in self.parents or self.parents[child_id] != parent_id:
             raise AuthorizationError("not_direct_child")
-        if parent.expires_at is not None and datetime.fromisoformat(parent.expires_at) <= datetime.fromisoformat(now()):
-            raise AuthorizationError("capability_expired")
+        invalid = self._invalid_chain(parent)
+        if invalid is not None:
+            raise AuthorizationError(invalid)
         child = Capability(
             parent.resource, actions, scope, parent_id, child_id, parent_id=capability_id,
             max_bytes=parent.max_bytes if max_bytes is None else max_bytes,
@@ -107,3 +109,38 @@ class Authority:
             "issuer": parent_id, "recipient": child_id, "issued_at": child.issued_at,
         }, parent_id=parent_id))
         return child
+
+    def _invalid_chain(self, capability: Capability) -> str | None:
+        visited: set[str] = set()
+        current = datetime.fromisoformat(now())
+        while True:
+            if capability.capability_id in visited:
+                return "capability_lineage_cycle"
+            visited.add(capability.capability_id)
+            if capability.capability_id in self.revoked:
+                return "capability_revoked"
+            if capability.expires_at is not None and datetime.fromisoformat(capability.expires_at) <= current:
+                return "capability_expired"
+            if capability.parent_id is None:
+                return None if capability.issuer == "kernel" else "forged_capability_provenance"
+            parent = self.grants.get(capability.parent_id)
+            if parent is None or parent.recipient != capability.issuer or not capability.is_subset_of(parent):
+                return "broken_capability_lineage"
+            if self.parents.get(capability.recipient) != capability.issuer:
+                return "broken_process_lineage"
+            capability = parent
+
+    def revoke(self, capability_id: str, *, actor: str, reason: str) -> None:
+        capability = self.grants.get(capability_id)
+        if capability is None:
+            raise AuthorizationError("unknown_capability")
+        if actor not in ("kernel", capability.issuer, capability.recipient):
+            raise AuthorizationError("revocation_denied")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("revocation reason required")
+        if capability_id in self.revoked:
+            return
+        self.revoked.add(capability_id)
+        self.events.append(Event(capability.recipient, "capability.revoked", {
+            "capability_id": capability_id, "actor": actor, "reason": reason,
+        }))
