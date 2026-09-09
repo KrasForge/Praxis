@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from praxis.executors.fake import FakeExecutor
 from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.kernel.authority import Authority
@@ -22,20 +24,27 @@ class SlowFake(FakeExecutor):
         return await super().collect_result(attempt_id)
 
 
-def test_fallback_preserves_spec_and_bounded_concurrency(tmp_path):
+@pytest.mark.parametrize("first_outcome", [Outcome(OutcomeStatus.UNAVAILABLE, "offline"),
+                                          Outcome(OutcomeStatus.FAILED, "transient", retryable=True)])
+def test_fallback_preserves_spec_and_bounded_concurrency(tmp_path, first_outcome):
     async def exercise():
         slow = SlowFake()
         kernel = Kernel(ProcessRecords(tmp_path / "records"), LocalWorkspaces(tmp_path / "ws"), {
-            "missing": FakeExecutor(Outcome(OutcomeStatus.UNAVAILABLE, "offline")), "ok": slow,
+            "missing": FakeExecutor(first_outcome), "ok": slow,
         }, authority=Authority(execution_defaults=frozenset({"missing", "ok"})))
         scheduler = Scheduler(kernel, concurrency=3, executor_limits={"ok": 1})
         processes = [kernel.create(ProcessSpec("work", "missing")) for _ in range(3)]
         originals = [p.spec.to_json() for p in processes]
+        identities = [(p.process_id, p.parent_id) for p in processes]
+        grants = dict(kernel.authority.grants)
         for process in processes:
             scheduler.enqueue(process.process_id, PlacementPolicy(("missing", "ok")))
         results = await scheduler.drain()
         assert all(result.status == OutcomeStatus.COMPLETED for result in results)
         assert slow.peak == 1
+        assert [(p.process_id, p.parent_id) for p in processes] == identities
+        assert all(kernel.authority.grants[key] == value for key, value in grants.items())
+        assert sum(e.type == "executor.invoked" for e in kernel.events) == 6
         assert [p.spec.to_json() for p in processes] == originals
         assert all(len({h.attempt_id for h in p.history}) == 2 for p in processes)
         assert all(value == 0 for value in scheduler.active.values())
