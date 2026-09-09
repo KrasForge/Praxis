@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from praxis.kernel.lineage import Lineage
 from praxis.kernel.spec import ProcessSpec
+from praxis.observability.tracing import TraceContext
 from praxis.remote.bundle import WorkspaceBundle
 
 
@@ -25,6 +26,7 @@ class Dispatch:
     lineage_json: str
     parent_id: str | None = None
     protocol_version: int = 1
+    trace_json: str | None = None
 
     def __post_init__(self) -> None:
         if any(not isinstance(v, str) or not v for v in (self.worker_id, self.process_id, self.attempt_id, self.executor)):
@@ -34,6 +36,8 @@ class Dispatch:
         if ProcessSpec.from_json(self.spec_json).capabilities:
             raise ValueError("dispatch_cannot_assert_authority")
         WorkspaceBundle.from_json(self.workspace_json)
+        if self.trace_json is not None:
+            TraceContext.from_json(self.trace_json)
         lineage = Lineage.from_json(self.lineage_json)
         if (lineage.process_id, lineage.attempt_id) != (self.process_id, self.attempt_id):
             raise ValueError("dispatch_lineage_mismatch")

@@ -19,6 +19,7 @@ class ExecutionRequest:
     protocol_version: int = 1
     parent_id: str | None = None
     lineage_json: str | None = None
+    trace_json: str | None = None
 
     def __post_init__(self) -> None:
         if self.protocol_version != 1 or type(self.protocol_version) is not int:

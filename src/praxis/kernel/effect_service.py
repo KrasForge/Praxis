@@ -13,6 +13,7 @@ from praxis.kernel.effects import Effect, EffectKind, EffectStatus
 from praxis.kernel.events import Event
 from praxis.kernel.lineage import Lineage
 from praxis.kernel.process import now
+from praxis.observability.tracing import process_context
 from praxis.storage.protocol import StoreConflict, StoreError
 from praxis.storage.sqlite import SQLiteStore
 
@@ -181,6 +182,7 @@ class EffectService:
             "effect_id": effect.effect_id, "attempt_id": effect.attempt_id,
             "effect": effect.to_json(), "capability_id": capability_id, "replay_safe": False,
             "lineage": lineage.to_json(),
+            "trace": json.loads(process_context(effect.process_id, lambda identity: self.store.load(identity).parent_id).child("attempt", effect.attempt_id).child("effect", effect.effect_id).to_json()),
         }, parent_id=parent, event_id=f"effect:{effect.effect_id}:{effect.version}")
         connection.execute("INSERT INTO events(event_id,process_id,body) VALUES(?,?,?)",
                            (event.event_id, effect.process_id, event.to_json()))

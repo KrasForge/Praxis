@@ -10,6 +10,7 @@ from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest
 from praxis.kernel.events import Event
 from praxis.kernel.lineage import Lineage
+from praxis.observability.tracing import TraceContext, process_context
 from praxis.remote.bundle import WorkspaceBundle
 from praxis.remote.dispatch import Dispatch
 from praxis.remote.workers import Worker
@@ -50,7 +51,8 @@ class RemoteExecutor(FakeExecutor):
         dispatch = Dispatch(self.worker.worker_id, self.worker.generation, request.process_id,
                             request.attempt_id, self.executor, request.spec.to_json(),
                             WorkspaceBundle.capture(self.workspaces, handle).to_json(),
-                            request.lineage_json or Lineage(request.process_id, request.attempt_id).to_json(), request.parent_id)
+                            request.lineage_json or Lineage(request.process_id, request.attempt_id).to_json(), request.parent_id,
+                            trace_json=request.trace_json or process_context(request.process_id, lambda identity: None).child("attempt", request.attempt_id).to_json())
         self.requests[request.attempt_id] = request
         self.dispatches[request.attempt_id] = dispatch
         event = Event(request.process_id, "worker.dispatch_pending", {"attempt_id": request.attempt_id,
@@ -99,6 +101,9 @@ class RemoteExecutor(FakeExecutor):
                         raise ValueError("remote_event_identity_mismatch")
                     if event.type not in {"worker.execution_started", "worker.execution_completed"} or event.payload.get("worker_id") != self.worker.worker_id or event.payload.get("generation") != self.worker.generation or event.payload.get("lineage") != dispatch.lineage_json:
                         raise ValueError("remote_event_provenance_mismatch")
+                    expected_trace = None if dispatch.trace_json is None else json.loads(TraceContext.from_json(dispatch.trace_json).child("worker", dispatch.execution_id).to_json())
+                    if event.payload.get("trace") != expected_trace:
+                        raise ValueError("remote_trace_mismatch")
                     if type(entry["cursor"]) is not int or entry["cursor"] <= self.cursors.get(attempt_id, 0):
                         raise ValueError("remote_event_cursor_replay")
                     self.events.append(event)

@@ -52,6 +52,11 @@ def test_placement_capacity_locality_and_dispatch(tmp_path):
         scheduler = DistributedScheduler(kernel, placement, Transport)
         assert (await scheduler.run(third.process_id, policy)).status == OutcomeStatus.COMPLETED
         assert kernel.result(third.process_id).usage["wall_milliseconds"] >= 0
+        events = [entry.event for entry in store.read_events(third.process_id)]
+        invocation = next(e.payload["trace"] for e in events if e.type == "executor.invoked")
+        remote = next(e.payload["trace"] for e in events if e.type == "worker.execution_completed")
+        assert remote["trace_id"] == invocation["trace_id"]
+        assert remote["parent_span_id"] == invocation["span_id"]
         clock[0] += 10
         fourth = kernel.create(ProcessSpec("fourth", "fake"))
         with pytest.raises(WorkerError, match="no_compatible"):

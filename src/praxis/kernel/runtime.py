@@ -27,6 +27,7 @@ from praxis.kernel.spec import ProcessSpec
 from praxis.kernel.retry import RetryError, RetryPolicy
 from praxis.kernel.usage import UsageLedger
 from praxis.observability.runtime import RuntimeMetrics
+from praxis.observability.tracing import process_context
 from praxis.storage.protocol import ProcessStore, StoredEvent
 from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
@@ -164,7 +165,9 @@ class Kernel:
                 self._move(process, State.RUNNING)
                 invocation_id = str(uuid4())
                 previous = next((e.event_id for e in reversed(self.events) if e.process_id == process.process_id), None)
+                trace = process_context(process.process_id, lambda identity: self.processes[identity].parent_id).child("attempt", process.attempt_id).child("executor", invocation_id)
                 invoked = Event(process.process_id, "executor.invoked", {
+                    "trace": json.loads(trace.to_json()),
                     "invocation_id": invocation_id, "executor": self.executor_name(process),
                     "attempt_id": process.attempt_id,
                     "lineage": Lineage(process.process_id, process.attempt_id,
@@ -172,7 +175,7 @@ class Kernel:
                 }, parent_id=process.parent_id)
                 self.events.append(invoked)
                 self.invocations[process.process_id] = (invocation_id, invoked.event_id)
-                request = replace(request, parent_id=process.parent_id,
+                request = replace(request, parent_id=process.parent_id, trace_json=trace.to_json(),
                                   lineage_json=Lineage(process.process_id, process.attempt_id,
                                                       (invoked.event_id,), invocation_id=invocation_id).to_json())
                 control = await executor.start(request)
@@ -342,8 +345,10 @@ class Kernel:
             results.append(result)
             invocation = self.invocations[process.process_id]
             payload = json.loads(result.to_json())
+            validator_run_id = str(uuid4())
+            payload["trace"] = json.loads(process_context(process.process_id, lambda identity: self.processes[identity].parent_id).child("attempt", process.attempt_id).child("executor", invocation[0]).child("validator", validator_run_id).to_json())
             payload["lineage"] = Lineage(process.process_id, process.attempt_id, (invocation[1],),
-                                         invocation_id=invocation[0], validator_run_id=str(uuid4())).to_json()
+                                         invocation_id=invocation[0], validator_run_id=validator_run_id).to_json()
             self.events.append(Event(process.process_id, "contract.checked", payload, parent_id=process.parent_id))
         report = evaluate(contract, source, tuple(results))
         self.verification[process.process_id] = report

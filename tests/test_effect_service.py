@@ -38,6 +38,8 @@ def test_staging_checks_and_revocation_before_application(tmp_path):
         approved = service.approve(staged.effect_id, staged.version)
         assert (await service.apply(approved.effect_id, approved.version)).applied
         assert len(adapter.calls) == 1
+        effect_events = [e.event for e in store.read_events(process.process_id) if e.event.type.startswith("effect.")]
+        assert len({e.payload["trace"]["trace_id"] for e in effect_events}) == 1
         another = service.stage(message_send(process.process_id, process.attempt_id, "channel", "revoked"))
         approved = service.approve(another.effect_id, another.version)
         authority.revoke(grant.capability_id, actor="kernel", reason="revoked")
