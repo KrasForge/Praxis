@@ -17,3 +17,10 @@ Histogram observations retain count, sum, minimum and maximum, rather than an
 unbounded sample list. Exporters can translate these aggregates into their
 backend's summary representation. Metric contract changes require an explicit
 version review; renaming or changing a unit is a breaking change.
+
+`Kernel.metrics.snapshot()` incrementally projects committed events through a
+stable cursor. Repeated scrapes do not count events again; a new runtime can
+rebuild the same metrics from its journal. This also includes effect events
+written directly by the effect service. Execution duration spans invocation
+through outcome recording, including verification overhead. Usage remains a
+separate resource ledger and includes recovery corrections.
