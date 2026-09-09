@@ -6,7 +6,9 @@ from urllib.parse import parse_qs
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from praxis.api.auth import Actor, SecurityHooks
 from praxis.api.service import APIError, ControlPlane
+from praxis.kernel.events import Event
 from praxis.storage.protocol import StoredEvent
 
 Receive = Callable[[], Awaitable[dict[str, Any]]]
@@ -14,8 +16,9 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class Application:
-    def __init__(self, service: ControlPlane):
+    def __init__(self, service: ControlPlane, security: SecurityHooks = SecurityHooks()):
         self.service = service
+        self.security = security
 
     async def __call__(self, scope: dict[str, Any], receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -30,6 +33,22 @@ class Application:
             return
         try:
             parts = scope["path"].strip("/").split("/")
+            headers = {key.lower(): value for key, value in scope.get("headers", [])}
+            action = ("submit" if scope["method"] == "POST" and parts == ["v1", "processes"] else
+                      "inspect" if len(parts) < 4 else parts[3])
+            identity = parts[2] if len(parts) >= 3 and parts[:2] == ["v1", "processes"] else None
+            try:
+                actor = self.security.authenticate({k.decode(): v.decode() for k, v in headers.items()})
+            except Exception:
+                actor = None
+            if not isinstance(actor, Actor):
+                raise APIError(401, "authentication_required")
+            try:
+                allowed = self.security.authorize(actor, action, identity) is True
+            except Exception:
+                allowed = False
+            if not allowed:
+                raise APIError(403, "action_denied")
             if scope["method"] == "GET" and len(parts) == 4 and parts[:2] == ["v1", "processes"] and parts[3] == "events":
                 headers = {key.lower(): value for key, value in scope.get("headers", [])}
                 query = parse_qs(scope.get("query_string", b"").decode())
@@ -52,9 +71,21 @@ class Application:
             data = json.loads(body) if body else {}
             if not isinstance(data, dict):
                 raise APIError(422, "object_request_required")
+            if "actor" in data and data["actor"] != actor.identity:
+                raise APIError(403, "actor_identity_mismatch")
+            if len(parts) == 4 and parts[3] in {"approvals", "interventions"} and scope["method"] == "POST":
+                data["actor"] = actor.identity
             key = headers.get(b"idempotency-key")
             status, response = await self.route(scope["method"], scope["path"], data,
-                                                None if key is None else key.decode())
+                                                None if key is None else key.decode(), actor)
+            if scope["method"] == "POST":
+                audit_id = response.get("process_id", identity)
+                if audit_id in self.service.kernel.processes:
+                    process = self.service.kernel.processes[audit_id]
+                    self.service.kernel.events.append(Event(audit_id, "api.action", {
+                        "actor": actor.identity, "action": action,
+                        "reason": data.get("reason", "API request"), "attempt_id": process.attempt_id,
+                    }, parent_id=process.parent_id))
         except APIError as exc:
             status, response = exc.status, exc.to_dict()
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -64,9 +95,9 @@ class Application:
                     "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(raw)).encode())]})
         await send({"type": "http.response.body", "body": raw})
 
-    async def route(self, method: str, path: str, data: dict[str, Any], key: str | None) -> tuple[int, dict[str, Any]]:
+    async def route(self, method: str, path: str, data: dict[str, Any], key: str | None, actor: Actor) -> tuple[int, dict[str, Any]]:
         if method == "POST" and path == "/v1/processes":
-            result = self.service.submit(data, key)
+            result = self.service.submit(data, key, actor=actor.identity)
             return (200 if result["duplicate"] else 202), result
         parts = path.strip("/").split("/")
         if method == "POST" and len(parts) == 4 and parts[:2] == ["v1", "processes"] and parts[3] == "control":

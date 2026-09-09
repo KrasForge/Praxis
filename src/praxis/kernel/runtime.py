@@ -87,7 +87,7 @@ class Kernel:
         self.locks: dict[str, asyncio.Lock] = {}
 
     def create(self, spec: ProcessSpec, parent_id: str | None = None,
-               *, canonical: CanonicalDirectory | None = None, submission_key: str | None = None) -> Process:
+               *, canonical: CanonicalDirectory | None = None, submission_key: str | None = None, submission_actor: str | None = None) -> Process:
         if parent_id is not None:
             parent = self.processes[parent_id]
             if parent.state in TERMINAL:
@@ -98,7 +98,8 @@ class Kernel:
         process = Process(ProcessSpec.from_json(spec.to_json()), parent_id=parent_id)
         self.budgets.allocate(process.process_id, ResourceBudget.from_json(json.dumps(spec.budget)), parent_id)
         event = Event(process.process_id, "process.created",
-                      {} if submission_key is None else {"submission_key": submission_key}, parent_id=parent_id)
+                      {**({} if submission_key is None else {"submission_key": submission_key}),
+                       **({} if submission_actor is None else {"actor": submission_actor})}, parent_id=parent_id)
         self._persist(process, event)
         self.authority.configure_process(process.process_id, parent_id)
         self.usage.register(process.process_id, parent_id)
