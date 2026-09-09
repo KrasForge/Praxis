@@ -121,3 +121,7 @@ class CodexExecutor(LocalProcessExecutor):
         outcome = Outcome(status, reason, "\n".join(messages), stderr, process.returncode)
         self.results[attempt_id] = outcome
         return outcome
+
+    async def signal(self, attempt_id: str, signal_name: str) -> ControlResult:
+        # OS signals other than cancellation are not Codex protocol controls.
+        return ControlResult(False, False, "signal_unavailable")

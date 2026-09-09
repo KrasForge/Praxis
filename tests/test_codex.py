@@ -60,3 +60,32 @@ def test_codex_stream_fixtures(tmp_path):
             if expected == OutcomeStatus.COMPLETED:
                 assert result.stdout == "answer"
     asyncio.run(exercise())
+
+
+def test_codex_controls(tmp_path):
+    import asyncio
+
+    from praxis.executors.outcomes import OutcomeStatus
+    from praxis.kernel.capabilities import Resource
+
+    async def exercise():
+        provider = LocalWorkspaces(tmp_path / "workspaces")
+        authority = Authority()
+        authority.issue("p", Resource.EXECUTOR, frozenset({"execute"}), "codex")
+        executable = tmp_path / "codex-fixture"
+        executable.write_text("#!/bin/sh\ncat >/dev/null\nsleep 60\n")
+        executable.chmod(0o700)
+        adapter = CodexExecutor(provider, authority, str(executable))
+        handle = provider.create("p")
+        request = ExecutionRequest("p", "a", ProcessSpec("wait", "codex"),
+                                   handle.workspace_id, provider.path_for(handle, "p"))
+        assert not (await adapter.checkpoint("a")).control.supported
+        assert not (await adapter.signal("a", "suspend")).supported
+        assert "checkpoint" not in adapter.descriptor.features
+        assert "restore" not in adapter.descriptor.features
+        assert (await adapter.start(request)).applied
+        await asyncio.sleep(0.02)
+        assert (await adapter.cancel("a")).applied
+        assert (await adapter.collect_result("a")).status == OutcomeStatus.CANCELLED
+        assert not (await adapter.cancel("a")).applied
+    asyncio.run(exercise())
