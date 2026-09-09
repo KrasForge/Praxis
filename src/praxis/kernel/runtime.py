@@ -166,6 +166,9 @@ class Kernel:
                 }, parent_id=process.parent_id)
                 self.events.append(invoked)
                 self.invocations[process.process_id] = (invocation_id, invoked.event_id)
+                request = replace(request, parent_id=process.parent_id,
+                                  lineage_json=Lineage(process.process_id, process.attempt_id,
+                                                      (invoked.event_id,), invocation_id=invocation_id).to_json())
                 control = await executor.start(request)
                 self.started[process.process_id].set()
                 if not control.applied:
