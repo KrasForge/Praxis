@@ -24,3 +24,8 @@ environment variables, then CLI/programmatic overrides. Keys are `storage_path`,
 keys. Unknown fields are rejected. Invalid values raise `ConfigError` with a
 machine-readable code and field. Secrets are not configuration fields; diagnostics
 serialize only this allowlisted schema and errors never echo rejected values.
+
+Kernel events use version 1 JSON envelopes containing event/process/parent identity,
+UTC-aware timestamp, type, and JSON payload. Missing or unknown envelope fields and
+unsupported versions are rejected. Additive vendor data belongs in namespaced
+payload entries; envelope changes require explicit version support.
