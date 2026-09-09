@@ -1,9 +1,12 @@
 """Typed authority claims; serialized claims do not themselves grant authority."""
 
+import ipaddress
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from praxis.kernel.process import now
@@ -50,6 +53,7 @@ class Capability:
         for value in (self.scope, self.issuer, self.recipient):
             if not isinstance(value, str) or not value.strip() or "\x00" in value:
                 raise ValueError("capability scope and provenance required")
+        object.__setattr__(self, "scope", normalize_scope(self.resource, self.scope))
         UUID(self.capability_id)
         if self.parent_id is not None:
             UUID(self.parent_id)
@@ -71,7 +75,7 @@ class Capability:
         return (
             self.resource == parent.resource
             and self.actions <= parent.actions
-            and (parent.scope == "*" or self.scope == parent.scope)
+            and scope_contains(self.resource, parent.scope, self.scope)
             and (parent.max_bytes is None or (
                 self.max_bytes is not None and self.max_bytes <= parent.max_bytes
             ))
@@ -97,3 +101,53 @@ class Capability:
             return cls(**data)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ValueError("invalid capability") from exc
+
+
+def normalize_scope(resource: Resource, scope: str) -> str:
+    if not isinstance(scope, str) or not scope or "\x00" in scope:
+        raise ValueError("invalid resource scope")
+    if scope == "*":
+        return scope
+    if resource == Resource.FILESYSTEM:
+        path = Path(scope)
+        if not path.is_absolute():
+            raise ValueError("filesystem scope must be absolute")
+        return str(path.resolve())
+    if resource == Resource.NETWORK:
+        wildcard = scope.startswith("*.")
+        host = scope[2:] if wildcard else scope
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None:
+            if wildcard:
+                raise ValueError("IP wildcards are unsupported")
+            return str(address)
+        host = host.rstrip(".").encode("idna").decode("ascii").lower()
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in host.split(".")
+        ):
+            raise ValueError("invalid network host scope")
+        return ("*." if wildcard else "") + host
+    if "*" in scope:
+        raise ValueError("partial wildcard is unsupported")
+    return scope
+
+
+def scope_contains(resource: Resource, granted: str, requested: str) -> bool:
+    try:
+        granted = normalize_scope(resource, granted)
+        requested = normalize_scope(resource, requested)
+    except (ValueError, OSError, UnicodeError, RuntimeError):
+        return False
+    if granted == "*":
+        return True
+    if requested == "*":
+        return False
+    if resource == Resource.FILESYSTEM:
+        return Path(requested).is_relative_to(Path(granted))
+    if resource == Resource.NETWORK and granted.startswith("*."):
+        return requested == granted or requested.removeprefix("*.").endswith(granted[1:])
+    return granted == requested
