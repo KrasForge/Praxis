@@ -79,7 +79,8 @@ class ControlPlane:
                     if p.parent_id == process_id), "spec": json.loads(process.spec.to_json()),
                 "result": result, "verification": None if report is None else json.loads(json.dumps(asdict(report))),
                 "effects": list(effects.values()), "usage": self.kernel.usage.total(process_id),
-                "last_event": None if not history else json.loads(history[-1].to_json())}
+                "last_event": None if not history else json.loads(history[-1].to_json()),
+                "recovery": next((e.payload for e in reversed(history) if e.type == "process.recovery"), None)}
 
     def inspect_tree(self, process_id: str) -> dict[str, Any]:
         pending = [process_id]

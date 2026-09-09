@@ -144,3 +144,6 @@ class RemoteExecutor(FakeExecutor):
             return ControlResult(True, False, "remote_transport_unavailable")
         except (ValueError, TypeError):
             return ControlResult(True, False, "remote_protocol_error")
+
+    def commit_allowed(self, attempt_id: str) -> bool:
+        return self.generation_current() and attempt_id in self.results

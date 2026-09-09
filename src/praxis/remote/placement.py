@@ -85,7 +85,7 @@ class WorkerPlacement:
 
     def finish(self, placement: Placement, *, uncertain: bool = False) -> None:
         with self.store._transaction() as connection:
-            connection.execute("UPDATE worker_assignments SET state=? WHERE process_id=? AND attempt_id=? AND worker_id=? AND generation=?",
+            connection.execute("UPDATE worker_assignments SET state=? WHERE process_id=? AND attempt_id=? AND worker_id=? AND generation=? AND state!='released'",
                                ("orphaned" if uncertain else "released", placement.process_id, placement.attempt_id,
                                 placement.worker_id, placement.generation))
 
@@ -110,7 +110,8 @@ class DistributedScheduler:
             features = next(e.features for e in capabilities.executors if e.name == policy.executor)
             executor = RemoteExecutor(worker, policy.executor, self.kernel.workspaces, self.transports(worker),
                                       self.kernel.events.append, features)
-            executor.generation_current = lambda: self.placement.heartbeats.registry.load(worker.worker_id).generation == worker.generation
+            executor.generation_current = lambda: (self.placement.heartbeats.registry.load(worker.worker_id).generation == worker.generation
+                                                    and worker.worker_id in self.placement.heartbeats.available(include_saturated=True))
             name = f"remote:{worker.worker_id}:{worker.generation}:{process.attempt_id}"
             self.kernel.executors[name] = executor
             self.kernel.authority.issue(process_id, Resource.EXECUTOR, frozenset({"execute", "control"}), name)
