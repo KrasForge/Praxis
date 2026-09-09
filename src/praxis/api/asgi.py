@@ -10,15 +10,18 @@ from praxis.api.auth import Actor, SecurityHooks
 from praxis.api.service import APIError, ControlPlane
 from praxis.kernel.events import Event
 from praxis.storage.protocol import StoredEvent
+from praxis.observability.redaction import RedactionPolicy
 
 Receive = Callable[[], Awaitable[dict[str, Any]]]
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class Application:
-    def __init__(self, service: ControlPlane, security: SecurityHooks = SecurityHooks()):
+    def __init__(self, service: ControlPlane, security: SecurityHooks = SecurityHooks(),
+                 redaction: RedactionPolicy | None = None):
         self.service = service
         self.security = security
+        self.redaction = redaction or RedactionPolicy()
 
     async def __call__(self, scope: dict[str, Any], receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -90,7 +93,7 @@ class Application:
             status, response = exc.status, exc.to_dict()
         except (ValueError, TypeError, UnicodeError, RecursionError):
             status, response = 422, APIError(422, "invalid_request").to_dict()
-        raw = json.dumps(response, allow_nan=False).encode()
+        raw = json.dumps(self.redaction.clean(response), allow_nan=False).encode()
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(raw)).encode())]})
         await send({"type": "http.response.body", "body": raw})
@@ -137,7 +140,7 @@ class Application:
                     entry = pending.result()
                 except StopAsyncIteration:
                     break
-                data = json.dumps({"cursor": entry.cursor, "event": json.loads(entry.event.to_json())})
+                data = json.dumps(self.redaction.clean({"cursor": entry.cursor, "event": json.loads(entry.event.to_json())}))
                 await send({"type": "http.response.body", "body": f"id: {entry.cursor}\nevent: praxis\ndata: {data}\n\n".encode(),
                             "more_body": True})
         finally:
