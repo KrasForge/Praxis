@@ -29,6 +29,8 @@ class Contract:
     invariants: tuple[Check, ...] = ()
     validators: tuple[Check, ...] = ()
     acceptance_checks: tuple[str, ...] = ()
+    quorum: int | None = None
+    quorum_checks: tuple[str, ...] = ()
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -48,6 +50,12 @@ class Contract:
             raise ValueError("duplicate contract identity")
         if not set(self.acceptance_checks) <= ids:
             raise ValueError("unknown acceptance check")
+        if not set(self.quorum_checks) <= ids or len(set(self.quorum_checks)) != len(self.quorum_checks):
+            raise ValueError("invalid quorum eligibility")
+        if self.quorum is not None and (type(self.quorum) is not int or not 1 <= self.quorum <= len(self.quorum_checks)):
+            raise ValueError("invalid quorum threshold")
+        if self.quorum is None and self.quorum_checks:
+            raise ValueError("quorum threshold required")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True, allow_nan=False)
@@ -58,7 +66,7 @@ class Contract:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("contract must be an object")
-            for name in ("required_outputs", "invariants", "validators", "acceptance_checks"):
+            for name in ("required_outputs", "invariants", "validators", "acceptance_checks", "quorum_checks"):
                 values = data.get(name, [])
                 if not isinstance(values, list):
                     raise ValueError("contract collections must be arrays")
