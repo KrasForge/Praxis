@@ -17,3 +17,19 @@ def negotiate(component: str, offered: list[int] | tuple[int, ...]) -> int:
     if not shared:
         raise CompatibilityError("incompatible_version")
     return max(shared)
+
+
+class PraxisDeprecationWarning(FutureWarning):
+    """Visible to applications by default; filterable or promotable to errors."""
+
+
+def warn_deprecated(feature: str, *, replacement: str, removal: str) -> None:
+    import re
+    import warnings
+
+    # Public identifiers only: never interpolate request content or credentials.
+    if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,100}", v)
+           for v in (feature, replacement, removal)):
+        raise ValueError("invalid_deprecation_notice")
+    warnings.warn(f"deprecated:{feature}; replacement:{replacement}; removal:{removal}",
+                  PraxisDeprecationWarning, stacklevel=2)

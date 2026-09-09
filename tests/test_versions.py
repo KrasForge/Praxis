@@ -27,3 +27,11 @@ def test_worker_negotiates_and_persists_version(tmp_path):
             await rpc.rpc({"operation": "register", "worker_id": "x", "incarnation": "boot", "protocol_versions": [2]}, "valid")
         store.close()
     asyncio.run(exercise())
+
+
+def test_deprecation_is_visible_filterable_and_contains_only_identifiers():
+    from praxis.compatibility import PraxisDeprecationWarning, warn_deprecated
+    with pytest.warns(PraxisDeprecationWarning, match="replacement:new_api"):
+        warn_deprecated("old_api", replacement="new_api", removal="2.0")
+    with pytest.raises(ValueError):
+        warn_deprecated("raw secret value", replacement="new_api", removal="2.0")
