@@ -53,6 +53,12 @@ class Process:
         transition(self.state, target)
         self.history.append(LifecycleEntry(target, now(), self.attempt_id))
 
+    def new_attempt(self) -> None:
+        if self.state not in (State.FAILED, State.CANCELLED):
+            raise ValueError("retry requires terminal failure")
+        self.attempt_id = str(uuid4())
+        self.history.append(LifecycleEntry(State.PENDING, now(), self.attempt_id))
+
     def to_json(self) -> str:
         data = asdict(self)
         data["spec"] = json.loads(self.spec.to_json())
@@ -75,7 +81,13 @@ class Process:
                 UUID(entry["attempt_id"])
                 if history:
                     previous = history[-1]
-                    transition(previous.state, state)
+                    if entry["attempt_id"] != previous.attempt_id:
+                        if previous.state not in (State.FAILED, State.CANCELLED) or state != State.PENDING:
+                            raise ValueError("invalid retry boundary")
+                        if any(item.attempt_id == entry["attempt_id"] for item in history):
+                            raise ValueError("attempt identity reused")
+                    else:
+                        transition(previous.state, state)
                     if timestamp < datetime.fromisoformat(previous.timestamp):
                         raise ValueError("unordered lifecycle timestamps")
                 elif state != State.PENDING:

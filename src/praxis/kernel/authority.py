@@ -47,7 +47,7 @@ class Authority:
                                 expires_at=expires_at, max_bytes=max_bytes)
         self.grants[capability.capability_id] = capability
         self.events.append(Event(recipient, "capability.issued", {
-            "capability_id": capability.capability_id,
+            "capability_id": capability.capability_id, "capability": capability.to_json(),
         }))
         return capability
 
@@ -106,6 +106,7 @@ class Authority:
         self.grants[child.capability_id] = child
         self.events.append(Event(child_id, "capability.delegated", {
             "capability_id": child.capability_id, "parent_capability_id": capability_id,
+            "capability": child.to_json(),
             "issuer": parent_id, "recipient": child_id, "issued_at": child.issued_at,
         }, parent_id=parent_id))
         return child
