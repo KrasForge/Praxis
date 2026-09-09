@@ -29,3 +29,9 @@ Kernel events use version 1 JSON envelopes containing event/process/parent ident
 UTC-aware timestamp, type, and JSON payload. Missing or unknown envelope fields and
 unsupported versions are rejected. Additive vendor data belongs in namespaced
 payload entries; envelope changes require explicit version support.
+
+Start with the [architecture](docs/architecture.md), [API](docs/api.md),
+[client SDK](docs/client.md), and [operations/recovery runbook](docs/operations.md).
+The [threat model](docs/threat-model.md), [isolation](docs/isolation.md),
+[secrets](docs/secrets.md), and [compatibility matrix](docs/versions.md) define
+runtime boundaries. Run `uv run python examples/demo.py` for offline examples.
