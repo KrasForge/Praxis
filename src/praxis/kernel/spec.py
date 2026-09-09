@@ -1,6 +1,7 @@
 """Versioned, vendor-independent process submission schema."""
 
 import json
+from praxis.kernel.parsing import load_object
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -98,7 +99,7 @@ class ProcessSpec:
     @classmethod
     def from_json(cls, raw: str) -> "ProcessSpec":
         try:
-            data = json.loads(raw)
+            data = load_object(raw)
             if not isinstance(data, dict):
                 raise SpecError("schema", "expected object")
             return cls(**data)

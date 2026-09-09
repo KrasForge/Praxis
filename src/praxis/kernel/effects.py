@@ -2,6 +2,7 @@
 
 import base64
 import json
+from praxis.kernel.parsing import load_object
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import Any
@@ -115,7 +116,7 @@ class Effect:
     @classmethod
     def from_json(cls, raw: str) -> "Effect":
         try:
-            data = json.loads(raw)
+            data = load_object(raw)
             data["kind"] = EffectKind(data["kind"])
             data["status"] = EffectStatus(data.get("status", "proposed"))
             authority = data["authority"]
