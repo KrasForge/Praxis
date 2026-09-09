@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from praxis.kernel.contracts import Contract
 from praxis.kernel.events import EventError, _validate_json
 
 
@@ -45,6 +46,10 @@ class ProcessSpec:
             if not isinstance(value, dict):
                 raise SpecError(name, "expected object")
             self._json(name, value)
+        try:
+            Contract.from_json(json.dumps(self.contract))
+        except ValueError:
+            raise SpecError("contract", "invalid contract") from None
         if any(not isinstance(v, str) for v in self.environment.values()):
             raise SpecError("environment", "expected string values")
         if not isinstance(self.capabilities, list) or any(
