@@ -19,6 +19,7 @@ from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
 from praxis.kernel.effects import Effect
 from praxis.kernel.results import ProcessResult
+from praxis.compatibility import negotiate
 from praxis.kernel.events import Event
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.lineage import Lineage
@@ -63,6 +64,9 @@ class Kernel:
         authority: Authority | None = None, validators: dict[str, Validator] | None = None,
         context_providers: dict[str, ContextProvider] | None = None,
     ):
+        negotiate("workspace", [workspaces.protocol_version])
+        for executor in executors.values():
+            negotiate("executor", [executor.descriptor.protocol_version])
         self.context_providers = dict(context_providers or {})
         self.records = records
         self.workspaces = workspaces
