@@ -39,7 +39,7 @@ def test_unavailable_and_unverified_fail_closed(tmp_path):
                         {"ok": FakeExecutor()}, authority=Authority(execution_defaults=frozenset({"ok", "missing"})))
         parent = kernel.create(ProcessSpec("parent", "ok"))
         missing = kernel.spawn(parent.process_id, ProcessSpec("work", "missing"))
-        unverified = kernel.spawn(parent.process_id, ProcessSpec("work", "ok", contract={"check": 1}))
+        unverified = kernel.spawn(parent.process_id, ProcessSpec("work", "ok", contract={"required_outputs": ["output"]}))
         outcomes = await kernel.join(parent.process_id, [missing, unverified])
         assert all(o.state == State.FAILED for o in outcomes)
         assert outcomes[0].outcome.status == OutcomeStatus.UNAVAILABLE
