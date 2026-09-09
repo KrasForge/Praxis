@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run --frozen pytest
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen mypy
+      - run: uv run --frozen praxis --help
+      - run: uv run --frozen praxis --version
