@@ -123,3 +123,38 @@ def test_controls_reject_stale_attempts_and_retry(tmp_path):
         assert status == 200 and not signal["control"]["applied"]
         assert len([e for e in kernel.events if e.type == "api.control"]) == 4
     asyncio.run(exercise())
+
+
+def test_pending_approvals_and_interventions(tmp_path):
+    from praxis.kernel.capabilities import Resource
+    from praxis.kernel.effect_service import EffectPolicy, EffectService
+    from praxis.kernel.effects import message_send
+    from praxis.kernel.spec import ProcessSpec
+    from praxis.storage.sqlite import SQLiteStore
+
+    async def exercise():
+        authority = Authority(execution_defaults=frozenset({"fake"}))
+        kernel = Kernel(SQLiteStore(tmp_path / "db"), LocalWorkspaces(tmp_path / "ws"), {"fake": FakeExecutor()}, authority=authority)
+        parent = kernel.create(ProcessSpec("parent", "fake"))
+        child = kernel.create(ProcessSpec("child", "fake"), parent.process_id)
+        authority.issue(child.process_id, Resource.EFFECT, frozenset({"stage"}), "channel")
+        authority.issue(child.process_id, Resource.EFFECT, frozenset({"apply"}), "message:channel")
+        authority.issue(parent.process_id, Resource.EFFECT, frozenset({"approve"}), "channel")
+        effects = EffectService(kernel.records, authority)
+        staged = effects.stage(message_send(child.process_id, child.attempt_id, "channel", "fixture"))
+        effects.apply_policy(staged.effect_id, staged.version, EffectPolicy.HUMAN, actor=parent.process_id, reason="review")
+        app = Application(ControlPlane(kernel, effects))
+        assert len((await request(app, "GET", f"/v1/processes/{parent.process_id}/approvals"))[1]["approvals"]) == 1
+        path = f"/v1/processes/{child.process_id}/approvals"
+        data = {"effect_id": staged.effect_id, "version": staged.version, "attempt_id": child.attempt_id,
+                "actor": parent.process_id, "reason": "reviewed", "approved": False}
+        status, result = await request(app, "POST", path, data)
+        assert status == 200 and result["approvals"][0]["decision"] == "denied"
+        assert (await request(app, "POST", path, data))[0] == 409
+        path = f"/v1/processes/{child.process_id}/interventions"
+        data = {"attempt_id": child.attempt_id, "actor": parent.process_id, "reason": "clarification",
+                "kind": "instruction", "content": "Preserve source citations"}
+        assert (await request(app, "POST", path, data))[1]["recorded"]
+        assert (await request(app, "POST", path, {**data, "attempt_id": "old"}))[0] == 409
+        assert child.spec.objective == "child"
+    asyncio.run(exercise())
