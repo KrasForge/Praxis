@@ -69,6 +69,8 @@ class Application:
             result = self.service.submit(data, key)
             return (200 if result["duplicate"] else 202), result
         parts = path.strip("/").split("/")
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["v1", "processes"] and parts[3] == "control":
+            return 200, await self.service.control(parts[2], data)
         if method == "GET" and len(parts) in (3, 4) and parts[:2] == ["v1", "processes"]:
             if len(parts) == 3:
                 return 200, self.service.inspect(parts[2])

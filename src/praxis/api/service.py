@@ -7,7 +7,9 @@ from dataclasses import asdict
 from typing import Any
 
 from praxis.kernel.lifecycle import TERMINAL
-from praxis.kernel.runtime import Kernel
+from praxis.kernel.events import Event
+from praxis.kernel.retry import RetryPolicy
+from praxis.kernel.runtime import CancellationPolicy, Kernel, ProcessSignal
 from praxis.kernel.spec import ProcessSpec, SpecError
 from praxis.storage.protocol import ProcessStore, StoredEvent
 
@@ -26,6 +28,7 @@ class APIError(ValueError):
 class ControlPlane:
     def __init__(self, kernel: Kernel):
         self.kernel = kernel
+        self.operation_locks: dict[str, asyncio.Lock] = {}
 
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None) -> dict[str, Any]:
         try:
@@ -112,3 +115,40 @@ class ControlPlane:
             if all(p["state"] in {state.value for state in TERMINAL} for p in family):
                 return
             await asyncio.sleep(0.05)
+
+    async def control(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self.inspect(process_id)
+        async with self.operation_locks.setdefault(process_id, asyncio.Lock()):
+            process = self.kernel.processes[process_id]
+            operation = data.get("operation")
+            try:
+                if data.get("attempt_id") != process.attempt_id:
+                    raise APIError(409, "stale_process_attempt")
+                if operation in {"suspend", "resume", "signal"}:
+                    signal = ProcessSignal(data.get("signal") if operation == "signal" else operation)
+                    response = asdict(await self.kernel.signal(process_id, signal))
+                elif operation == "cancel":
+                    controls = await self.kernel.cancel(process_id, CancellationPolicy(data.get("policy", "self")))
+                    response = {identity: asdict(control) for identity, control in controls.items()}
+                elif operation == "retry":
+                    options = dict(data.get("retry", {}))
+                    if "retryable_reasons" in options:
+                        reasons = options["retryable_reasons"]
+                        if not isinstance(reasons, list) or any(not isinstance(v, str) for v in reasons):
+                            raise ValueError("invalid retry reasons")
+                        options["retryable_reasons"] = frozenset(reasons)
+                    attempt = await self.kernel.retry(process_id, RetryPolicy(**options))
+                    response = {"supported": True, "applied": True, "attempt_id": attempt}
+                else:
+                    raise APIError(422, "unknown_control_operation")
+            except APIError as exc:
+                self.kernel.events.append(Event(process_id, "api.control", {
+                    "operation": operation, "applied": False, "code": exc.code}, parent_id=process.parent_id))
+                raise
+            except (ValueError, TypeError, PermissionError):
+                self.kernel.events.append(Event(process_id, "api.control", {
+                    "operation": operation, "applied": False, "code": "control_rejected"}, parent_id=process.parent_id))
+                raise APIError(409, "control_rejected") from None
+            self.kernel.events.append(Event(process_id, "api.control", {
+                "operation": operation, "attempt_id": process.attempt_id, "response": response}, parent_id=process.parent_id))
+            return {"process_id": process_id, "attempt_id": process.attempt_id, "control": response}

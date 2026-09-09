@@ -99,3 +99,27 @@ def test_sse_reconnect_and_tree_cursors(tmp_path):
         assert [e["cursor"] for e in first + second] == [entry.cursor for entry in complete]
         assert len({e["event"]["event_id"] for e in first + second}) == len(complete)
     asyncio.run(exercise())
+
+
+def test_controls_reject_stale_attempts_and_retry(tmp_path):
+    from praxis.executors.outcomes import Outcome, OutcomeStatus
+
+    async def exercise():
+        kernel = make_kernel(tmp_path)
+        kernel.executors["fake"] = FakeExecutor(Outcome(OutcomeStatus.FAILED, "transient", retryable=True))
+        app = Application(ControlPlane(kernel))
+        _, submitted = await request(app, "POST", "/v1/processes", {"objective": "task", "executor": "fake"})
+        pid = submitted["process_id"]
+        await kernel.tasks[pid]
+        old = kernel.processes[pid].attempt_id
+        path = f"/v1/processes/{pid}/control"
+        assert (await request(app, "POST", path, {"operation": "cancel", "attempt_id": "old"}))[0] == 409
+        kernel.executors["fake"] = FakeExecutor()
+        status, retry = await request(app, "POST", path, {"operation": "retry", "attempt_id": old})
+        assert status == 200 and retry["attempt_id"] != old
+        await kernel.tasks[pid]
+        assert (await request(app, "POST", path, {"operation": "suspend", "attempt_id": old}))[0] == 409
+        status, signal = await request(app, "POST", path, {"operation": "signal", "signal": "interrupt", "attempt_id": retry["attempt_id"]})
+        assert status == 200 and not signal["control"]["applied"]
+        assert len([e for e in kernel.events if e.type == "api.control"]) == 4
+    asyncio.run(exercise())
