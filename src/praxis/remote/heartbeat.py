@@ -4,7 +4,8 @@ import json
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from praxis.executors.features import ExecutorFeatures
 from praxis.kernel.process import now
@@ -105,3 +106,20 @@ class Heartbeats:
                     if capabilities.capacity > 0:
                         result[identity] = capabilities
         return result
+
+
+class RegistryRPC:
+    """Registration/heartbeat counterpart hosted through WorkerApplication."""
+    def __init__(self, heartbeats: Heartbeats):
+        self.heartbeats = heartbeats
+
+    async def rpc(self, data: dict[str, Any], credential: str) -> dict[str, Any]:
+        if data.get("operation") == "register":
+            worker = self.heartbeats.registry.register(data["worker_id"], data["incarnation"],
+                data["protocol_version"], credential, replace_generation=data.get("replace_generation"))
+            return {"worker": asdict(worker)}
+        if data.get("operation") == "heartbeat":
+            self.heartbeats.heartbeat(data["worker_id"], data["generation"], data["sequence"],
+                WorkerCapabilities.from_json(json.dumps(data["capabilities"])), credential)
+            return {"accepted": True}
+        raise WorkerError("unsupported_registry_operation")
