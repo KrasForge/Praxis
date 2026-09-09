@@ -34,3 +34,42 @@ def test_noesis_export_preserves_unverified_state_and_lineage():
         transport.error = TransportError("transport_unavailable")
         assert (await exporter.export(result)).status == "unavailable"
     asyncio.run(exercise())
+
+
+def test_publication_policy_durable_duplicates(tmp_path):
+    from dataclasses import replace
+
+    from praxis.kernel.authority import Authority
+    from praxis.kernel.capabilities import Resource
+    from praxis.kernel.process import Process
+    from praxis.kernel.spec import ProcessSpec
+    from praxis.knowledge.policy import PublicationPolicy, PublicationService
+    from praxis.storage.sqlite import SQLiteStore
+
+    class Transport:
+        calls = 0
+        async def request(self, method, path, body=None):
+            self.calls += 1
+            return {"document_id": body["document_id"]}
+    async def exercise():
+        store = SQLiteStore(tmp_path / "db")
+        process = Process(ProcessSpec("task", "fake"))
+        process.move(State.FAILED)
+        store.save(process)
+        result = ProcessResult(process.process_id, process.attempt_id, State.FAILED, Outcome(OutcomeStatus.PARTIAL, "partial"))
+        transport = Transport()
+        exporter = NoesisExporter(transport)
+        authority = Authority()
+        service = PublicationService(store, authority, exporter)
+        assert (await service.publish(result)).reason == "publication_ineligible"
+        policy = PublicationPolicy(False, frozenset({State.FAILED}))
+        service = PublicationService(store, authority, exporter, policy)
+        assert (await service.publish(result)).reason == "publication_capability_denied"
+        authority.issue(process.process_id, Resource.EFFECT, frozenset({"apply"}), "noesis")
+        assert (await service.publish(result)).status == "accepted"
+        service = PublicationService(store, authority, exporter, policy)
+        assert (await service.publish(result)).status == "duplicate"
+        assert transport.calls == 1
+        assert (await service.publish(replace(result, conclusion="changed"))).reason == "publication_idempotency_conflict"
+        store.close()
+    asyncio.run(exercise())
