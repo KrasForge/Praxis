@@ -1,6 +1,7 @@
 # Python v1 client
 
-The client ships in praxis-runtime with no extra dependencies. Configure credentials from a host secret provider; never hard-code them in a spec.
+The client comes in praxis-runtime and it needs no other dependency. Get the
+credentials from the secret provider of the host. Never write them in a spec.
 
 ```python
 from praxis.client import Client, ClientAPIError
@@ -18,8 +19,29 @@ async def run(base_url, token):
     return view.result
 ```
 
-`Submission`, `ProcessView`, and `ControlReceipt` are typed response models. `ProcessView.result` is the core v1 ProcessResult; `events` yields StoredEvent containing the core Event. Additional inspection fields are in `view.data`, including redacted spec, blocking reason, last event, and recovery metadata. Redacted specs are diagnostic views, not guaranteed resubmission documents.
+`Submission`, `ProcessView` and `ControlReceipt` are typed models of a response.
+`ProcessView.result` is the core ProcessResult of v1. `events` yields a
+StoredEvent that contains the core Event.
 
-Use `client.control(pid, current_attempt_id, "cancel", policy="tree")` for subtree cancellation. Other operations are suspend, resume, signal (with signal=...), and retry (with retry policy fields). Stale attempts return ClientAPIError(409). Refused or unsupported executor controls remain explicit control data. No operation silently retries a mutation.
+The other fields for inspection are in `view.data`. They include the redacted
+spec, the reason for a block, the last event and the metadata for recovery. A
+redacted spec is a view for diagnosis. Praxis does not promise that you can
+submit it again.
 
-TransportError reports network or malformed-wire failure. ClientAPIError reports an HTTP/API rejection. A failed process is ordinary result data with state, outcome, verification, and a structured error; it does not raise a transport exception. On interrupted SSE, reconnect with the last processed cursor. The HTTP implementation has bounded per-frame reads and deadlines, rejects redirects, closes streams on cancellation, and does not automatically resubmit work. Use the same idempotency key to resolve a lost submission acknowledgement.
+Use `client.control(pid, current_attempt_id, "cancel", policy="tree")` to cancel
+a subtree. The other operations are suspend, resume, signal (with `signal=...`)
+and retry (with the fields of a retry policy). A stale attempt returns
+`ClientAPIError(409)`. If an executor refuses a control, or does not support it,
+that fact stays explicit in the control data. No operation retries a mutation
+silently.
+
+`TransportError` reports a failure of the network or of the wire format.
+`ClientAPIError` reports a rejection by HTTP or by the API. A process that failed
+is ordinary result data: it has a state, an outcome, a verification and a
+structured error, and it raises no transport exception.
+
+If SSE stops, reconnect with the last cursor that you processed. The HTTP
+implementation bounds each frame read, applies deadlines, rejects redirects and
+closes a stream on cancellation. It never submits work again automatically. To
+resolve an acknowledgement of a submission that you lost, use the same
+idempotency key.

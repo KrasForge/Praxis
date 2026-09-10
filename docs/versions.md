@@ -1,6 +1,8 @@
 # v1 version matrix
 
-Package versions describe releases. Wire schema versions describe document semantics. SQLite user_version describes storage layout. These numbers are independent.
+A package version describes a release. A wire schema version describes the
+semantics of a document. The SQLite `user_version` describes the layout of the
+storage. These numbers are independent.
 
 | Component | Version field / declaration | Read | Write |
 | --- | --- | --- | --- |
@@ -14,26 +16,114 @@ Package versions describe releases. Wire schema versions describe document seman
 | Effect | schema_version | 1 | 1 |
 | Worker | registration/dispatch protocol_version | 1 | 1 |
 
-`praxis.compatibility.VERSIONS` is the machine-readable matrix. `negotiate(component, offered)` chooses the highest supported common version, rejecting booleans, empty or malformed offers and unknown components. Worker registration accepts either the original single `protocol_version` or `protocol_versions: [1]`; its returned worker record contains the chosen version. Dispatch must use that version and current generation. Negotiation never changes persisted documents or silently translates semantics. Each executor feature must also be explicitly advertised; a matching protocol version does not imply checkpoint/cancel support.
+`praxis.compatibility.VERSIONS` is the matrix that a machine can read.
+`negotiate(component, offered)` chooses the highest common version that Praxis
+supports. It rejects booleans, an empty offer, a malformed offer and an unknown
+component.
 
-Top-level schemas are closed: unknown fields fail validation. Optional fields with specified defaults support older v1 documents. Forward reading of arbitrary newer fields is not promised. Senders targeting a known older reader must omit unsupported optional fields or use the common negotiated schema. No v2 reader or converter is claimed today.
+Worker registration accepts the original single `protocol_version`, or
+`protocol_versions: [1]`. The worker record that it returns contains the chosen
+version. A dispatch must use that version and the current generation.
 
-Vendor controls belong under metadata.codex, metadata.claude, or metadata.deepseek and their adapters validate the allowed keys. Host annotations belong under metadata using an organization/application key, for example metadata.example_app. Experimental extensions use metadata.experimental with an owner and version. These namespaces carry data, never new authority or changes to required contract semantics. Do not add vendor flags to ProcessSpec top-level fields or infer grants from metadata. Stable core context inputs use the reserved praxis.context namespace.
+Negotiation never changes a stored document, and it never translates semantics
+silently. An executor must also advertise each feature explicitly. A protocol
+version that agrees does not imply support for a checkpoint or for a
+cancellation.
 
-## Compatibility and deprecation policy
+A top-level schema is closed: an unknown field fails validation. An optional
+field that has a specified default supports an older v1 document. Praxis does
+not promise to read arbitrary newer fields. A sender that targets a known older
+reader has two options. It can omit the optional fields that the reader does not
+support. It can also use the common negotiated schema. Praxis claims no v2
+reader and no converter today.
 
-Within a supported wire version, existing required fields retain their meanings, units, authorization requirements and defaults. New readers must read the oldest supported fixtures. Optional fields may be added only when omission preserves old behavior; because readers reject unknown fields, a new writer must not send them to an older reader without a negotiated capability. Package patch releases do not intentionally break documented public Python signatures. Internal underscored APIs and experimental namespaces carry no such promise.
+A vendor control belongs under `metadata.codex`, `metadata.claude` or
+`metadata.deepseek`, and its adapter checks the permitted keys. A host
+annotation belongs under `metadata` with a key for the organization or the
+application, for example `metadata.example_app`. An experimental extension uses
+`metadata.experimental` with an owner and a version.
 
-Breaking changes include deleting or renaming fields, changing defaults or units, accepting previously forbidden authority, changing terminal-state/verification semantics, adding required fields, or dropping supported protocol pairs. They require a new schema/protocol version and explicit migration/negotiation. Security fixes may tighten malformed or unsafe input validation without retaining the vulnerable behavior; release notes must identify the change. Database upgrades use ordered transactions; wire negotiation is not a database migration.
+These namespaces carry data. They never carry new authority, and they never
+change the required semantics of a contract. Do not put a vendor flag in a
+top-level field of ProcessSpec. Never infer a grant from metadata. A stable core
+context input uses the reserved namespace `praxis.context`.
 
-A deprecation starts with release notes naming the replacement, a migration example, and a removal release. Public Python entry points call `warn_deprecated(feature, replacement=..., removal=...)`, which emits `PraxisDeprecationWarning` (a visible FutureWarning). Hosts can promote it to an error with `warnings.simplefilter("error", PraxisDeprecationWarning)` in compatibility CI. Notices contain public identifiers only. No current v1 feature is deprecated; the helper is the mechanism for future notices, not a warning on every normal call.
+## The policy for compatibility and deprecation
 
-Removal requires at least two minor releases and 90 days after the first published notice, and the next breaking protocol/package major where applicable. Maintain old readers and regression fixtures through that window. Experimental features may change sooner if their explicit owner/version changes. If a replacement is not available, removal must be postponed or identified as a documented security exception.
+Inside a supported wire version, an existing required field keeps its meaning,
+its units, its requirements for authorization and its default. A new reader must
+read the oldest fixtures that Praxis supports.
 
-Examples: adding an optional result error with a default of null is backward-readable by the new reader, while old readers need the field omitted. Changing cost_microusd to floating dollars is a new schema version. A worker offering [2, 1] selects 1 today; a peer offering only [2] fails explicitly. Moving a Codex model option into the core schema is not a compatible vendor extension. Unsupported versions must never be interpreted as v1 by stripping their version fields.
+You can add an optional field only when its omission keeps the old behavior. A
+reader rejects an unknown field. Thus a new writer must not send that field to
+an older reader without a capability that both sides negotiated. A patch release
+of the package does not break a documented public Python signature on purpose.
+An internal API with an underscore, and an experimental namespace, carry no such
+promise.
 
-## Persisted layouts
+These changes are breaking:
 
-SQLite layout 1 contains processes, ordered events and checkpoints. Layout 2 adds an event lookup index and migration history; process/event JSON and cursors remain unchanged. SQLiteStore automatically upgrades supported layouts 0 (empty) and 1 to 2 under one BEGIN IMMEDIATE transaction. A failed statement rolls back data, DDL and user_version together. Unknown future layouts are rejected; no downgrade is attempted. Optional subsystem tables remain owned by their services and are preserved by these migrations.
+- To delete a field, or to rename one
+- To change a default, or to change a unit
+- To accept authority that Praxis forbade before
+- To change the semantics of a terminal state, or of verification
+- To add a required field
+- To drop a supported pair of protocols
 
-Back up the complete quiesced runtime before upgrading. Keep the old package and backup until the upgraded runtime passes inspection and qualification. Never point an older binary at an upgraded database: restore the backup as a separate recovery operation. Migration authors must append contiguous versions, use individual transactional statements, preserve historical fixtures, and include failure-injection tests. Do not use executescript or external side effects inside a migration.
+Each one needs a new schema version or protocol version. Each one also needs an
+explicit migration or negotiation.
+
+A security fix can make the validation of malformed or unsafe input stricter,
+and it does not have to keep the vulnerable behavior. The release notes must
+identify that change.
+
+A deprecation starts with release notes that name the replacement, a migration
+example and the release that removes the feature. A public Python entry point
+calls `warn_deprecated(feature, replacement=..., removal=...)`. That emits a
+`PraxisDeprecationWarning`, which is a visible FutureWarning. A host can make it
+an error with `warnings.simplefilter("error", PraxisDeprecationWarning)` in its
+CI for compatibility. A notice contains public identifiers only. No v1 feature
+is deprecated today. The helper is the mechanism for a future notice. It is not
+a warning on an ordinary call.
+
+A removal needs all of these:
+
+- At least two minor releases
+- At least 90 days after the first published notice
+- The next breaking major version of the protocol or the package, where that
+  applies
+
+Keep the old readers and the regression fixtures through that window. An
+experimental feature can change sooner if its explicit owner or version
+changes. If a replacement is not available, you must postpone
+the removal, or identify it as a documented exception for security.
+
+Examples. To add an optional result error with a default of null is
+backward-readable by the new reader, but an old reader needs that field omitted.
+To change `cost_microusd` into floating dollars is a new schema version. A
+worker that offers `[2, 1]` selects 1 today, and a peer that offers only `[2]`
+fails explicitly. To move an option for a Codex model into the core schema is
+not a compatible vendor extension. Never interpret an unsupported version as v1
+by removing its version fields.
+
+## The stored layouts
+
+SQLite layout 1 contains the processes, the ordered events and the checkpoints.
+Layout 2 adds an index to look up an event, and a history of migrations. The
+JSON of the processes and events, and the cursors, do not change.
+
+SQLiteStore upgrades the supported layouts 0 (empty) and 1 to layout 2, under
+one `BEGIN IMMEDIATE` transaction. If a statement fails, the rollback covers the
+data, the DDL and the `user_version` together. Praxis rejects an unknown future
+layout, and it attempts no downgrade. An optional table of a subsystem stays
+owned by its service, and these migrations keep it.
+
+Back up the complete quiesced runtime before you upgrade. Keep the old package
+and the backup until the upgraded runtime passes inspection and qualification.
+Never point an older binary at an upgraded database. Restore the backup as a
+separate operation for recovery.
+
+An author of a migration must append contiguous versions, use individual
+transactional statements, keep the historical fixtures, and include tests that
+inject a failure. Do not use `executescript` inside a migration, and do not
+cause an external side effect there.

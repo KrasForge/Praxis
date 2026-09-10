@@ -1,7 +1,33 @@
 # Secret providers
 
-Implement `SecretProvider.resolve(name) -> str` in the trusted host (for example, a vault client). Construct `SecretAccess(provider, authority, redaction)` with the same authority as the kernel and the same `RedactionPolicy` as diagnostic exporters. Give a local executor host-owned `secret_bindings={"SERVICE_TOKEN": "service/token"}` and the access object. Issue `Resource.SECRET`, action `read`, scoped to `service/token` to the process before starting it. No provider is installed by default.
+Implement `SecretProvider.resolve(name) -> str` in the trusted host, for example
+as a client of a vault. Make a `SecretAccess(provider, authority, redaction)`
+with the same authority as the kernel, and the same `RedactionPolicy` as your
+exporters for diagnostics.
 
-Bindings contain names, never values, and are not controlled by ProcessSpec. The full batch is authorized before resolving any value. Values enter only the subprocess environment; they are absent from stored requests and output is redacted before Outcome creation. Revocation denies subsequent access; it cannot withdraw a value already delivered to a running process. Terminate that process and rotate the credential when needed.
+Give a local executor the access object and the bindings that the host owns, for
+example `secret_bindings={"SERVICE_TOKEN": "service/token"}`. Issue
+`Resource.SECRET` with the action `read`, scoped to `service/token`, to the
+process before you start it. Praxis installs no provider by default.
 
-Do not place credentials in environment/config/inputs. Those fields are ordinary persisted data. Provider exceptions are converted to a stable error without exception text. Remote workers and third-party agent SDKs must resolve credentials locally through trusted host adapters; controller-resolved values must never be included in dispatch envelopes. A granted workload can deliberately encode or write its secret to an artifact, so restrict artifact publication and network access as described in TM-7. Secret delivery does not claim protection against a malicious authorized recipient.
+A binding contains a name, never a value, and a ProcessSpec does not control it.
+Praxis authorizes the full batch before it resolves any value. A value enters
+only the environment of the subprocess. It is absent from the stored request,
+and Praxis redacts the output before it makes an Outcome.
+
+A revocation denies later access. It cannot withdraw a value that Praxis already
+gave to a running process. If you must withdraw one, stop that process and
+rotate the credential.
+
+Do not put a credential in the environment, the configuration or the inputs.
+Those fields are ordinary stored data. Praxis converts an exception from a
+provider into a stable error that holds no exception text.
+
+A remote worker and a third-party agent SDK must resolve credentials locally,
+through trusted adapters of the host. A value that the controller resolved must
+never go into a dispatch envelope.
+
+A workload that holds a secret can encode it deliberately, or write it to an
+artifact. Thus you must restrict the publication of artifacts and the access to
+the network, as TM-7 describes. To deliver a secret is not a claim of protection
+against a recipient that you authorized and that then behaves badly.

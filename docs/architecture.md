@@ -1,32 +1,90 @@
 # Architecture and failure semantics
 
-For a worked introduction to this model, read [concepts](concepts.md) first. This
-page states the boundaries and semantics precisely.
+For an introduction to this model, read [concepts](concepts.md) first. This page
+gives the boundaries and the semantics precisely.
 
 ## Ownership
 
-Praxis owns execution, authority, verification and recovery. Modulo owns human interaction; Noesis owns knowledge. The kernel depends on executor/workspace/provider protocols and never on model-specific result semantics. Native SDK options live in adapter namespaces.
+Praxis owns execution, authority, verification and recovery. Modulo owns the
+interaction with people. Noesis owns knowledge. The kernel depends on the
+protocols for executors, workspaces and providers. It never depends on the
+result semantics of a model. The options of a native SDK stay in the namespace
+of its adapter.
 
 ## Processes, outcomes and results
 
-A ProcessSpec declares objective, executor, inputs, ordinary environment, acceptance contract, budget, context dependencies and scheduling metadata. Kernel.create snapshots it, allocates budget and persists identity. start creates a workspace and an attempt-bound executor request. An Outcome describes execution; a ProcessResult describes terminal state, independent verification, effects, evidence and usage. Completed requires successful execution and approved verification. Failed validation can therefore produce state=failed with outcome.status=completed. Cancellation, unavailability, timeout, partial output, budget exhaustion, transport failure and policy denial remain distinguishable.
+A ProcessSpec declares the objective, the executor, the inputs, the ordinary
+environment, the acceptance contract, the budget, the context dependencies and
+the metadata for scheduling. `Kernel.create` makes a snapshot of the spec,
+allocates the budget and stores the identity. `start` makes a workspace and an
+executor request that is bound to an attempt.
+
+An Outcome describes the execution. A ProcessResult describes the terminal
+state, the independent verification, the effects, the evidence and the usage. A
+completed result needs execution that succeeded and verification that Praxis
+approved. Thus validation that failed can give `state=failed` together with
+`outcome.status=completed`.
+
+Praxis keeps these conditions distinct: cancellation, unavailability, timeout,
+partial output, an exhausted budget, a failure of transport and a denial by
+policy.
 
 ## Workspaces, verification and publication
 
-Workspaces are private staging directories. Snapshots identify immutable bytes. Validators consume disposable snapshot copies. CanonicalDirectory is a managed version store whose current pointer changes atomically after verification and baseline checks. It is not a Git checkout and does not automatically commit/push a repository. Git commits and other external writes are staged effects with separate authority, approval and reconciliation. A process can complete without a canonical target; only a workspace.committed receipt proves canonical publication.
+A workspace is a private directory for staging. A snapshot identifies immutable
+bytes. A validator uses a disposable copy of a snapshot.
+
+CanonicalDirectory is a managed store of versions. Its current pointer changes
+atomically, after the checks of verification and baseline. It is not a Git
+checkout. It does not commit a repository automatically, and it does not push
+one. A git commit and any other external write is a staged effect, with its own
+authority, approval and reconciliation.
+
+A process can complete without a canonical target. Only a `workspace.committed`
+receipt proves canonical publication.
 
 ## Composition
 
-Parent-child relationships control lifecycle and budget inheritance. Graph dependencies are separate DAG edges with success/terminal requirements and block/fail/continue policies. GraphStore persists versioned mutations. Hosts resolve graph readiness and enqueue runnable nodes; there is no implicit global graph daemon. Supervisor and speculative candidate services coordinate fork/join, evaluation, selection and winner-only publication.
+A parent-child relation controls the lifecycle and the inheritance of a budget.
+A graph dependency is a separate edge in a DAG. It carries a requirement of
+success or of a terminal state, and a policy of block, fail or continue.
+GraphStore keeps the versions of each change.
+
+The host finds which graph nodes are ready and queues the runnable ones. There
+is no global graph daemon. Supervisor and the services for speculative
+candidates coordinate the fork, the join, the evaluation, the selection and the
+publication of the winner only.
 
 ## Persistence and distribution
 
-SQLite atomically stores processes, event cursors, checkpoints and subsystem records. A kernel is a single controller owner; the in-memory task map is not a distributed lock. Workers register identities/generations, advertise capabilities and renew heartbeat leases. DistributedScheduler reserves capacity and dispatches versioned workspace bundles; it fences stale results before canonical commit. A lost acknowledgement is uncertain, not proof of failure. Recovery requires positive termination confirmation before relocation when the old worker may still run.
+SQLite stores the processes, the event cursors, the checkpoints and the records
+of each subsystem, and it does so atomically. A kernel is a single owner of the
+controller. The map of tasks in memory is not a distributed lock.
+
+A worker registers its identity and its generation, advertises its capabilities
+and renews a heartbeat lease. DistributedScheduler reserves the capacity and
+sends versioned bundles of the workspace. It fences a stale result before a
+canonical commit.
+
+An acknowledgement that Praxis lost is uncertain. It is not proof of failure. If
+the old worker can still run, recovery needs positive confirmation that the work
+stopped before Praxis moves it.
 
 ## Knowledge and effects
 
-Context providers return bounded provenance-bearing context. NoesisContextProvider implements noesis-kb-v1 retrieval; PublicationService separately gates exports using verified result policy, candidate status, scoped authority and idempotent receipts. Retrieval never publishes automatically. Approved effects and knowledge publication are not implicitly performed by receiving model output.
+A context provider returns bounded context that carries its provenance.
+NoesisContextProvider gives retrieval for noesis-kb-v1. PublicationService is
+separate: it gates an export with the policy for a verified result, the status
+of the candidate, a scoped authority and an idempotent receipt.
+
+Retrieval never publishes automatically. To receive model output does not apply
+an approved effect, and it does not publish knowledge.
 
 ## Observability
 
-Public data exports use redaction, finite-cardinality metrics and trace correlations. The journal remains privileged recovery data. Read the [threat model](threat-model.md), [isolation policy](isolation.md), [secret integration](secrets.md), [version matrix](versions.md), and [operations runbook](operations.md) before hosting native workloads.
+An export of public data uses redaction, metrics of finite cardinality and
+correlations of traces. The journal stays privileged data for recovery.
+
+Before you host native workloads, read the [threat model](threat-model.md), the
+[isolation policy](isolation.md), the [secret integration](secrets.md), the
+[version matrix](versions.md) and the [operations runbook](operations.md).

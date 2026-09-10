@@ -1,38 +1,124 @@
 # Runtime threat model (v1)
 
-This model describes the runtime's trust assumptions, not a claim that running arbitrary native code is safe. References TM-1 through TM-9 are stable identifiers for security tests and deployment reviews.
+This model describes the trust assumptions of the runtime. It is not a claim
+that it is safe to run arbitrary native code. The references TM-1 to TM-9 are
+stable identifiers for the security tests and for the reviews of a deployment.
 
 | Boundary | Trusted side | Untrusted input / attacker ability |
 | --- | --- | --- |
-| Kernel | Host configuration, Python runtime, kernel code and installed adapters | Submitted specs, tool/model output, child requests, context content |
-| Control plane | Host authentication and per-action authorization hooks | Anonymous clients, authenticated users targeting another process, forged actor fields |
-| Workers | Authenticated worker operators and their OS isolation | Network peers, stale worker generations, replayed dispatch and heartbeat messages |
-| Executors | Adapter implementation loaded by host | Executed programs, model prompts, output, dependency code inside the execution environment |
-| Workspaces | Provider implementation and private metadata/blobs | Candidate filenames, symlinks, traversal, concurrent writes by a running program |
-| Transports | TLS endpoint identity and host-configured origins | Partitions, lost acknowledgements, malformed responses, oversized bodies, redirects |
-| Stores | Kernel owner and host filesystem permissions | Corrupt/truncated records, interrupted writes; other OS users must not have write access |
-| Secrets | Host provider and explicitly authorized destination | Secret names from workloads; output deliberately echoing a granted secret |
+| Kernel | The host configuration, the Python runtime, the kernel code and the installed adapters | Submitted specs, tool and model output, child requests, context content |
+| Control plane | The authentication of the host and the hooks that authorize each action | Anonymous clients, an authenticated user who targets another process, forged actor fields |
+| Workers | The authenticated operators of a worker and their OS isolation | Network peers, stale worker generations, replayed messages of dispatch and heartbeat |
+| Executors | The adapter implementation that the host loaded | Executed programs, model prompts, output, dependency code inside the execution environment |
+| Workspaces | The provider implementation and the private metadata and blobs | Candidate filenames, symlinks, traversal, concurrent writes by a running program |
+| Transports | The TLS endpoint identity and the origins that the host configured | Partitions, lost acknowledgements, malformed responses, oversized bodies, redirects |
+| Stores | The kernel owner and the filesystem permissions of the host | Corrupt or truncated records, interrupted writes. Other OS users must not have write access |
+| Secrets | The host provider and the destination that Praxis authorized explicitly | Secret names from a workload, output that repeats a granted secret deliberately |
 
-TM-1: Authority comes from the kernel's grant registry. A serialized capability, an executor event, or a ProcessSpec cannot issue authority. Delegation must narrow scope, actions, byte constraints, and expiration; ancestor revocation applies. In-process Python plugins have kernel privileges and must be trusted. A malicious *native workload* is different from a malicious installed adapter.
+**TM-1.** Authority comes from the registry of grants in the kernel. A
+serialized capability cannot issue authority. An executor event cannot issue
+authority. A ProcessSpec cannot issue authority. A delegation must make the
+scope, the actions, the limits on bytes and the expiration smaller. If you
+revoke an ancestor, that revocation applies. A Python plugin in the process has
+the privileges of the kernel, so you must trust it. A *native workload* that an
+attacker controls is a different threat from an installed adapter that an
+attacker controls.
 
-TM-2: Authentication is required for every API request. Authorization binds actor, action, and process. Default hooks deny. Body actor fields cannot impersonate another actor. Hosts must enforce ownership in their authorization hook, use TLS, rate limits and request deadlines, and protect administrative endpoints. An authenticated SSE connection is authorized at connection time; disconnect it when revoking sessions.
+**TM-2.** Every API request needs authentication. Authorization binds the actor,
+the action and the process. The default hooks deny. An actor field in a body
+cannot impersonate another actor. A host must apply the rules of ownership in
+its authorization hook. It must use TLS, rate limits and request deadlines, and
+it must protect the administrative endpoints. Praxis authorizes an authenticated
+SSE connection when the client connects. To revoke a session, disconnect it.
 
-TM-3: Workspace ownership checks and path normalization protect provider APIs. Native subprocess cwd alone is not isolation. Untrusted programs require OS confinement with a private mount/process/network namespace or an equivalent dedicated worker. Never mount controller state, sibling workspaces, credentials, or the canonical directory into an untrusted execution environment. Symlink rejection at snapshot/import boundaries supplements OS containment; it cannot replace it during execution.
+**TM-3.** The checks of workspace ownership and the normalization of paths
+protect the APIs of a provider. The `cwd` of a native subprocess is not
+isolation. An untrusted program needs OS confinement, with a private namespace
+for mounts, processes and the network, or an equivalent dedicated worker. Never
+mount the controller state, a sibling workspace, credentials or the canonical
+directory into an untrusted execution environment. The rejection of symlinks at
+the boundaries of snapshot and import supplements OS containment. It cannot
+replace that containment during execution.
 
-TM-4: Completion is not verification. Canonical writes require a validator-approved immutable snapshot, a current baseline, explicit commit authority, and (for remote execution) a live generation fence. Candidate workspaces and staged effects remain isolated until winner selection. Validators execute in disposable copies; native validator commands require the same confinement as executors. Validators and rubrics are trusted policy; a compromised validator can approve bad content.
+**TM-4.** Completion is not verification. A canonical write needs all of these:
 
-TM-5: External effects are staged and policy-authorized. Applying an effect requires current authority and approval state. Idempotency receipts and explicit reconciliation handle lost acknowledgements; uncertainty never proves non-execution. Recovery must positively fence old workers before replay. A partition timeout alone cannot authorize relocation of possibly active work.
+- A snapshot that is immutable and that a validator approved
+- A baseline that is current
+- Explicit authority to commit
+- For remote execution, a live fence on the generation
 
-TM-6: Worker identity, generation, attempt, event lineage, trace context, cursors and result envelopes must agree. Replays cannot create a second execution or resurrect a released reservation. Authenticated workers are trusted to report execution and usage honestly; v1 does not provide remote attestation or protect against a compromised worker operator. Secret-bearing workloads must use a worker trusted for those secrets.
+A candidate workspace and a staged effect stay isolated until Praxis
+selects a winner. A validator runs in a disposable copy. A native validator
+command needs the same confinement as an executor. A validator and a rubric are
+trusted policy: a validator that an attacker controls can approve bad content.
 
-TM-7: Secret values belong in a provider, not specifications or ordinary config. Access requires scoped secret-read authority. Inject only into an explicitly authorized executor destination, register values for output redaction, and never serialize injection material into dispatch, checkpoints, events, or results. Redaction cannot stop an authorized malicious workload from encoding or exfiltrating a secret; enforce network/resource isolation and grant least privilege.
+**TM-5.** Praxis stages an external effect and the policy authorizes it. To
+apply an effect, Praxis needs current authority and a current state of approval.
+An idempotency receipt and an explicit reconciliation handle an acknowledgement
+that Praxis lost. Uncertainty never proves that the effect did not occur. Before
+a replay, recovery must fence the old worker positively. A timeout during a
+partition cannot authorize the relocation of work that can still be active.
 
-TM-8: The journal and backups are privileged recovery data. Public diagnostics pass through redaction before export. Error records use stable codes rather than raw exception text. Hosts must register any externally injected secret values with the redactor and apply it to custom exporters and logging handlers. Memory introspection, root access, debugger access and malicious kernel plugins are outside this protection.
+**TM-6.** The identity of a worker, its generation, the attempt, the lineage of
+events, the trace context, the cursors and the result envelopes must all agree.
+A replay cannot make a second execution, and it cannot restore a reservation
+that Praxis released. Praxis trusts an authenticated worker to report its
+execution and its usage honestly. Version 1 gives no remote attestation, and it
+does not protect against an operator of a worker that an attacker controls. Put
+a workload that carries secrets only on a worker that you trust with those
+secrets.
 
-TM-9: Protocol parsers reject unsupported versions, invalid types, forged identities and unsafe paths. Resource limits bound accepted transport documents and causal chains. CPU, memory, disk and process-count containment require host OS controls; application budgets are accounting and scheduling controls, not a replacement for cgroups/quotas. Live model providers and third-party SDK behavior require deployment qualification beyond offline fixtures.
+**TM-7.** A secret value belongs in a provider. It does not belong in a
+specification or in ordinary configuration. Access needs scoped authority to
+read a secret. Inject a value only into an executor destination that Praxis
+authorized explicitly. Register the value for the redaction of output. Never
+serialize the injection material into a dispatch, a checkpoint, an event or a
+result. Redaction cannot stop a malicious workload that you authorized from
+encoding a secret or sending it out. Apply isolation of the network and of
+resources, and grant the least privilege.
 
-## Security regression map
+**TM-8.** The journal and the backups are privileged data for recovery. Public
+diagnostics go through redaction before an export. An error record uses a stable
+code, not raw exception text. A host must register any secret value that it
+injected with the redactor. It must also apply the redactor to its custom
+exporters and logging handlers. Introspection of memory, root access, debugger
+access and a malicious kernel plugin stay outside this protection.
 
-Capability and authority tests exercise TM-1; API authorization tests TM-2; workspace, bundle and isolation tests TM-3; verification, transaction and candidate tests TM-4; effects and recovery tests TM-5; remote worker tests TM-6; secret and redaction canaries TM-7/TM-8; deterministic malformed-input and compatibility suites TM-9. Tests should cite these identifiers when adding attack regressions.
+**TM-9.** A protocol parser rejects an unsupported version, an invalid type, a
+forged identity and an unsafe path. Resource limits bound the transport
+documents that Praxis accepts, and they bound the causal chains. Containment of
+CPU, memory, disk and the count of processes needs the OS controls of the host.
+An application budget is a control for accounting and scheduling. It does not
+replace cgroups and quotas. A live model provider and the behavior of a
+third-party SDK need qualification in the deployment, beyond the offline
+fixtures.
 
-Excluded threats: compromised host kernel/root, malicious installed Python packages, physical access, side channels, provider model confidentiality guarantees, and cryptographic attestation. Deployment owners remain responsible for OS patching, TLS, backup encryption, credential rotation, provider terms, and independent containment of untrusted code.
+## The map of security regressions
+
+The capability and authority tests exercise TM-1. The API authorization tests
+exercise TM-2. The workspace, bundle and isolation tests exercise TM-3. The
+verification, transaction and candidate tests exercise TM-4. The effect and
+recovery tests exercise TM-5. The remote worker tests exercise TM-6. The secret
+and redaction canaries exercise TM-7 and TM-8. The deterministic tests for
+malformed input, and the compatibility suites, exercise TM-9. When you add a
+regression for an attack, cite these identifiers.
+
+## The threats that stay outside
+
+These threats are excluded:
+
+- A host kernel or a root account that an attacker controls
+- Malicious Python packages that you installed
+- Physical access
+- Side channels
+- The confidentiality guarantees of a provider model
+- Cryptographic attestation
+
+The owner of a deployment stays responsible for these items:
+
+- OS patching
+- TLS
+- The encryption of backups
+- The rotation of credentials
+- The terms of a provider
+- The independent containment of untrusted code
