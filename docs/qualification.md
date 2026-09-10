@@ -1,6 +1,6 @@
 # v1.0.0 release qualification
 
-Praxis qualified this release on 2026-09-09. Package 1.0.0 uses the v1 wire
+Praxis qualified this release on 2026-09-10. Package 1.0.0 uses the v1 wire
 contracts and SQLite layout 2.
 
 The reproducible gate builds an sdist and then builds its wheel. It installs
