@@ -30,3 +30,6 @@ jobs:
       - run: uv run --frozen mypy
       - run: uv run --frozen praxis --help
       - run: uv run --frozen praxis --version
+      - name: Qualify installed wheel in a fresh environment
+        if: matrix.python == '3.12'
+        run: uv run --frozen python scripts/qualify.py

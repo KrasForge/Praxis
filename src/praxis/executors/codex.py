@@ -77,7 +77,8 @@ class CodexExecutor(LocalProcessExecutor):
         assert process.stdin is not None and process.stdout is not None
         assert process.stderr is not None
         request = self.requests[attempt_id]
-        stderr_task = asyncio.create_task(process.stderr.read())
+        stderr_task = asyncio.create_task(self._read_output(attempt_id, process, process.stderr))
+        stream_bytes = 0
         messages: list[str] = []
         terminal: str | None = None
         malformed = False
@@ -86,6 +87,10 @@ class CodexExecutor(LocalProcessExecutor):
             await process.stdin.drain()
             process.stdin.close()
             async for line in process.stdout:
+                stream_bytes += len(line)
+                if stream_bytes > self.max_output_bytes:
+                    self.output_limited.add(attempt_id)
+                    raise ValueError("output_limit_exceeded")
                 try:
                     raw = json.loads(line)
                     if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
@@ -112,6 +117,8 @@ class CodexExecutor(LocalProcessExecutor):
         stderr = (await stderr_task).decode(errors="replace")
         if attempt_id in self.cancelled:
             status, reason = OutcomeStatus.CANCELLED, "cancelled"
+        elif attempt_id in self.output_limited:
+            status, reason = OutcomeStatus.PARTIAL, "output_limit_exceeded"
         elif malformed:
             status, reason = OutcomeStatus.PARTIAL, "codex_invalid_stream"
         elif terminal in {"turn.failed", "error"}:

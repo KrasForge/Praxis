@@ -152,6 +152,10 @@ class Kernel:
             executor = self.executors.get(self.executor_name(process))
             if executor is None:
                 result = Outcome(OutcomeStatus.UNAVAILABLE, "executor_not_found")
+            elif self.budgets.remaining(process.process_id, "wall_milliseconds") == 0:
+                result = Outcome(OutcomeStatus.BUDGET_EXHAUSTED, "wall_budget_exhausted")
+            elif self.budgets.remaining(process.process_id, "wall_milliseconds") is not None and "cancel" not in executor.descriptor.features:
+                result = Outcome(OutcomeStatus.UNAVAILABLE, "budget_cancellation_unavailable")
             elif "resource_reporting" not in executor.descriptor.features and any(
                 getattr(self.budgets.limits[process.process_id], resource) is not None
                 for resource in RESOURCES - {"wall_milliseconds"}
