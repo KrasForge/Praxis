@@ -79,4 +79,5 @@ class WorkspaceBundle:
                 path.mkdir(exist_ok=True)
             else:
                 path.write_bytes(base64.b64decode(content, validate=True))
-            path.chmod(mode)
+        for name, _, mode in sorted(self.entries, key=lambda item: len(PurePosixPath(item[0]).parts), reverse=True):
+            (root / name).chmod(mode)

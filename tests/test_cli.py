@@ -6,7 +6,7 @@ import pytest
 
 @pytest.mark.parametrize("args,code,text", [
     (["--help"], 0, "Praxis execution runtime"),
-    (["--version"], 0, "praxis 0.1.0"),
+    (["--version"], 0, "praxis 1.0.0"),
     (["unknown"], 2, "unrecognized arguments"),
 ])
 def test_cli(args, code, text):

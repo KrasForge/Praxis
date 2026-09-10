@@ -9,3 +9,5 @@ Subprocesses receive only the declared environment plus authorized provider valu
 Codex, Claude and DeepSeek adapters require `isolated_worker=True`, a trusted host assertion that the worker is independently confined. This flag does not create a sandbox. Mount only that worker's current workspace and approved runtime/resources, with provider-specific network policy and credentials. LocalProcessExecutor's `isolation=None` is reserved for trusted code or an already isolated host; it does not advertise isolation. Untrusted specs cannot set either host option.
 
 Namespaces limit visibility and network access. They do not impose memory, disk, PID-count or CPU quotas; use cgroups and filesystem quotas for those limits. See TM-3/TM-9 and [Bubblewrap's security model](https://github.com/containers/bubblewrap#sandbox-security). A compromised OS kernel or installed Python adapter remains outside the trust boundary.
+
+Native stdout/stderr and Codex stream accumulation are bounded to 1 MiB per stream/attempt by default. Exceeding the limit terminates the process and returns an explicit non-success outcome. Hosts may configure LocalProcessExecutor.max_output_bytes.

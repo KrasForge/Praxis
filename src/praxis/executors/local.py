@@ -21,10 +21,14 @@ from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
 class LocalProcessExecutor(FakeExecutor):
     def __init__(self, workspaces: LocalWorkspaces, *, secrets: SecretAccess | None = None,
                  secret_bindings: dict[str, str] | None = None,
-                 isolation: LinuxIsolation | None = LinuxIsolation()):
+                 isolation: LinuxIsolation | None = LinuxIsolation(), max_output_bytes: int = 1048576):
         super().__init__()
         self.workspaces = workspaces
         self.isolation = isolation
+        if type(max_output_bytes) is not int or max_output_bytes < 1:
+            raise ValueError("positive_output_limit_required")
+        self.max_output_bytes = max_output_bytes
+        self.output_limited: set[str] = set()
         self.secrets = secrets
         self.secret_bindings = dict(secret_bindings or {})
         if self.secret_bindings and secrets is None:
@@ -102,7 +106,23 @@ class LocalProcessExecutor(FakeExecutor):
         self, attempt_id: str, process: asyncio.subprocess.Process,
         stdin: bytes, timeout: float | None,
     ) -> Outcome:
-        communication = asyncio.create_task(process.communicate(stdin))
+        async def communicate() -> tuple[bytes, bytes]:
+            assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+            async def feed() -> None:
+                assert process.stdin is not None
+                try:
+                    process.stdin.write(stdin)
+                    await process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    process.stdin.close()
+            output, error, _ = await asyncio.gather(
+                self._read_output(attempt_id, process, process.stdout),
+                self._read_output(attempt_id, process, process.stderr), feed())
+            await process.wait()
+            return output, error
+        communication = asyncio.create_task(communicate())
         timed_out = False
         try:
             stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout)
@@ -112,6 +132,8 @@ class LocalProcessExecutor(FakeExecutor):
             stdout, stderr = await communication
         if attempt_id in self.cancelled:
             status, reason = OutcomeStatus.CANCELLED, "cancelled"
+        elif attempt_id in self.output_limited:
+            status, reason = OutcomeStatus.FAILED, "output_limit_exceeded"
         elif timed_out:
             status, reason = OutcomeStatus.TIMED_OUT, "deadline_exceeded"
         elif process.returncode == 0:
@@ -127,6 +149,17 @@ class LocalProcessExecutor(FakeExecutor):
         result = Outcome(status, reason, output, error, process.returncode)
         self.results[attempt_id] = result
         return result
+
+    async def _read_output(self, attempt_id: str, process: asyncio.subprocess.Process,
+                           stream: asyncio.StreamReader) -> bytes:
+        output = bytearray()
+        while chunk := await stream.read(65536):
+            remaining = self.max_output_bytes - len(output)
+            output.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                self.output_limited.add(attempt_id)
+                self._kill(process)
+        return bytes(output)
 
     async def collect_result(self, attempt_id: str) -> Outcome:
         if attempt_id not in self.tasks:
