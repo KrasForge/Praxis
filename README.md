@@ -2,22 +2,25 @@
 
 **A process execution kernel that refuses to call unverified work successful.**
 
-Praxis runs work — native programs, shell commands, agent adapters, remote workers —
-and owns the semantics around it: authority, verification, transactional publication
-and recovery. A process that exits `0` is not a process that succeeded. Praxis keeps
-those two facts apart in the type system, in the persisted record, and at the commit
-boundary, so a failed or unverified result can never reach a canonical artifact.
+Praxis runs work: native programs, shell commands, agent adapters and remote
+workers. It owns the rules around that work: authority, verification,
+transactional publication and recovery. A process that exits `0` did not
+necessarily succeed. Praxis keeps those two facts apart in the types, in the
+stored record, and at the commit boundary. Thus a failed or an unverified result
+cannot become a canonical artifact.
 
 Praxis is a library and an ASGI service, not an application. Modulo owns the
-human-facing UX; Noesis owns knowledge. Model-specific integrations live in executor
-adapters, never in the kernel.
+interface for people. Noesis owns knowledge. Adapters hold the code for each
+model; the kernel does not.
 
-- **Status:** v1.0.0 — v1 wire contracts, SQLite layout 2. See the
-  [qualification report](docs/qualification.md) for coverage and deployment limits.
-- **Requires:** Python 3.11–3.14. Local sandboxed execution requires Linux and
+- **Status:** v1.0.0, with v1 wire contracts and SQLite layout 2. The
+  [qualification report](docs/qualification.md) gives the coverage and the
+  deployment limits.
+- **Requires:** Python 3.11 to 3.14. Local sandboxed execution needs Linux and
   [Bubblewrap](https://github.com/containers/bubblewrap).
-- **Dependencies:** none at runtime. The kernel, API, client and adapters are pure
-  standard library; model SDKs and ASGI servers are host dependencies.
+- **Dependencies:** none at runtime. The kernel, the API, the client and the
+  adapters use only the standard library. Model SDKs and ASGI servers are host
+  dependencies.
 
 ## Install
 
@@ -26,13 +29,14 @@ uv sync --locked          # editable install with dev tooling
 uv run python examples/demo.py
 ```
 
-`examples/demo.py` runs offline — no model calls, no external publication — and
-exercises local execution, verified commit, graphs, an agent-adapter fixture, Noesis
-contract mapping, control-plane inspection and restart recovery.
+`examples/demo.py` runs offline. It makes no model calls and it publishes
+nothing. It tests local execution, verified commit, graphs, an adapter fixture,
+the Noesis contract, control-plane inspection and recovery after a restart.
 
 ## Quickstart
 
-Run a program, require an artifact, publish it only if verification approves:
+Run a program, require an artifact, and publish the artifact only if
+verification approves it.
 
 ```python
 import asyncio, sys
@@ -86,71 +90,73 @@ completed completed True
 42
 ```
 
-The process ran in a private, sandboxed workspace. Its output was snapshotted,
-checked against the contract, and only then committed to the canonical directory.
+The process ran in a private sandboxed workspace. Praxis made a snapshot of the
+output and checked it against the contract. Only then did Praxis commit it to
+the canonical directory.
 
 ### The invariant, concretely
 
-Now replace the program with one that writes nothing — `"pass"` — and change nothing
-else. It still exits `0`, so the executor still reports `completed`:
+Now replace the program with one that writes nothing: `"pass"`. Change nothing
+else. The program still exits `0`, so the executor still reports `completed`.
 
 ```
 failed completed False
 ```
 
 `result.verification.missing_outputs` is `('answer.txt',)`, and the canonical
-directory is empty. The executor completed; the *process* failed, because
-verification did not approve it, so nothing was published. That distinction —
-`state` vs `outcome.status` — is the core of the kernel, and it holds across restart,
-retry, remote dispatch and recovery.
+directory is empty. The executor completed, but the process failed, because
+verification did not approve it. Thus Praxis published nothing. This difference
+between `state` and `outcome.status` is the core of the kernel. It holds after a
+restart, a retry, a remote dispatch and a recovery.
 
 ## Core model
 
 | Concept | What it is |
 | --- | --- |
-| `ProcessSpec` | Versioned submission: objective, executor, inputs, environment, contract, budget, context, metadata. Closed schema; unknown fields are rejected. |
-| `Outcome` | What the executor did: `completed`, `failed`, `cancelled`, `timed_out`, `partial`, `budget_exhausted`, `unavailable`. |
-| `ProcessResult` | What the kernel concluded: terminal `state`, the outcome, independent `verification`, artifacts, evidence, claims, effects, usage. |
-| `Contract` | Machine-checkable acceptance: required outputs, invariants, validators, quorum. |
-| Workspace | A private staging directory. Snapshots identify immutable bytes; validators run on disposable copies. |
-| `CanonicalDirectory` | A managed version store whose `current` pointer moves atomically, only after verification, baseline and authority checks. |
-| `Capability` | Typed, kernel-issued authority over filesystem, network, executor, workspace, secret or effect scopes. Delegation may only narrow. |
-| Effect | An external write (git commit, message, publication) staged and approved separately from execution, with idempotency receipts. |
-| `ProcessGraph` | DAG dependencies with success/terminal requirements and block/fail/continue policies, persisted via `GraphStore`. |
+| `ProcessSpec` | The versioned submission: objective, executor, inputs, environment, contract, budget, context and metadata. The schema is closed, thus an unknown field causes a rejection. |
+| `Outcome` | What the executor did: `completed`, `failed`, `cancelled`, `timed_out`, `partial`, `budget_exhausted` or `unavailable`. |
+| `ProcessResult` | What the kernel concluded: the terminal `state`, the outcome, an independent `verification`, artifacts, evidence, claims, effects and usage. |
+| `Contract` | The acceptance rules that a machine can check: required outputs, invariants, validators and quorum. |
+| Workspace | A private directory for staging. A snapshot identifies immutable bytes. Validators use disposable copies. |
+| `CanonicalDirectory` | A managed store of versions. Its `current` pointer moves atomically, and only after the checks of verification, baseline and authority. |
+| `Capability` | Authority with a type, issued by the kernel, over filesystem, network, executor, workspace, secret or effect scopes. A delegation can only make a scope smaller. |
+| Effect | A write to the world outside the workspace, for example a git commit, a message or a publication. Praxis stages it and approves it apart from execution, and gives it an idempotency receipt. |
+| `ProcessGraph` | Dependencies in a DAG, with requirements for success or for a terminal state, and policies of block, fail or continue. `GraphStore` keeps them. |
 
-Read [concepts](docs/concepts.md) for how these fit together, and
-[architecture](docs/architecture.md) for failure semantics.
+Read [concepts](docs/concepts.md) to see how these parts fit together. Read
+[architecture](docs/architecture.md) for the failure semantics.
 
 ## Executors
 
-Register any mapping of name to executor with the kernel. Features are advertised,
-not assumed — a matching protocol version does not imply cancellation or checkpoint
-support, and the kernel refuses wall-limited work on an adapter that cannot cancel.
+Register a map of names to executors with the kernel. An executor advertises its
+features; the kernel does not assume them. A protocol version that agrees does
+not show support for cancellation or for checkpoints. If an adapter cannot
+cancel, the kernel refuses work that has a wall limit.
 
 | Executor | Purpose | Advertised features |
 | --- | --- | --- |
-| `LocalProcessExecutor` | `argv` execution in a Bubblewrap sandbox | `cancel`, `isolation`, `signal`, `suspend` (POSIX) |
-| `ShellExecutor` | POSIX shell, gated by explicit `shell` authority | inherits local |
-| `CodexExecutor` | Codex CLI over a JSON stream | `cancel`, `streaming` |
-| `ClaudeExecutor` | Claude Agent SDK | none — no reliable cancel/checkpoint |
-| `DeepSeekExecutor` | DeepSeek API | none — no reliable cancel/checkpoint |
-| `RemoteExecutor` | Dispatch to a registered, fenced worker | `streaming` + negotiated controls |
-| `FakeExecutor` | Deterministic executor for tests and smoke servers | `cancel` |
+| `LocalProcessExecutor` | Runs `argv` in a Bubblewrap sandbox | `cancel`, `isolation`, `signal`, `suspend` (POSIX) |
+| `ShellExecutor` | Runs a POSIX shell, after a check of explicit `shell` authority | the same as local |
+| `CodexExecutor` | Uses the Codex CLI through a JSON stream | `cancel`, `streaming` |
+| `ClaudeExecutor` | Uses the Claude Agent SDK | none: no reliable cancel or checkpoint |
+| `DeepSeekExecutor` | Uses the DeepSeek API | none: no reliable cancel or checkpoint |
+| `RemoteExecutor` | Sends work to a registered worker that has a fence | `streaming` and the negotiated controls |
+| `FakeExecutor` | Gives deterministic results for tests and smoke servers | `cancel` |
 
-The three agent adapters require `isolated_worker=True` — a host assertion that the
-worker is independently confined. The flag does not create a sandbox. See
-[isolation](docs/isolation.md).
+The three agent adapters need `isolated_worker=True`. This flag is an assertion
+by the host that something else confines the worker. The flag does not make a
+sandbox. See [isolation](docs/isolation.md).
 
 ## Serving and consuming the control plane
 
-Host the ASGI application; anonymous access is denied by default:
+Host the ASGI application. By default it denies anonymous access.
 
 ```sh
 PRAXIS_API_TOKEN=$(openssl rand -hex 24) \
 uv run --with uvicorn uvicorn examples.server:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-Submit, stream and control from the bundled typed client:
+Submit work, stream events and control the process with the typed client:
 
 ```python
 from praxis.client import Client
@@ -166,32 +172,33 @@ async for stored in client.events(receipt.process_id, after=cursor):
 view = await client.inspect(receipt.process_id)
 ```
 
-The sample server is deliberately one operator and a fake executor. Put TLS, rate
-limits, deadlines and a real authorization rule in front of it before exposure —
-[operations](docs/operations.md) and [API](docs/api.md) describe what a host owes.
+The sample server has one operator and a fake executor, on purpose. Before you
+expose it, put TLS, rate limits, deadlines and a real authorization rule in
+front of it. [Operations](docs/operations.md) and [API](docs/api.md) list what a
+host must supply.
 
 ## Documentation
 
-Indexed in [docs/](docs/README.md).
+The index is in [docs/](docs/README.md).
 
 | Document | Read it for |
 | --- | --- |
-| [Concepts](docs/concepts.md) | The execution model, end to end, with runnable code |
-| [Architecture](docs/architecture.md) | Ownership boundaries and failure semantics |
-| [Configuration](docs/configuration.md) | TOML keys, precedence, event envelopes |
-| [Control-plane API](docs/api.md) | HTTP routes, status codes, SSE cursors |
-| [Client SDK](docs/client.md) | Typed submit/inspect/control/stream flows |
-| [Operations](docs/operations.md) | Install, serve, upgrade, back up, recover |
-| [Threat model](docs/threat-model.md) | TM-1..TM-9 trust boundaries and what is excluded |
-| [Isolation](docs/isolation.md) | Sandbox construction, mounts, output limits |
-| [Secrets](docs/secrets.md) | Provider integration and injection boundaries |
-| [Redaction](docs/redaction.md) | What is scrubbed before bytes leave the controller |
-| [Metrics](docs/metrics.md) | Stable metric names, units, label allowlists |
-| [Versions](docs/versions.md) | Wire/storage version matrix, compatibility policy |
-| [Qualification](docs/qualification.md) | v1.0.0 release evidence and deployment limits |
+| [Concepts](docs/concepts.md) | The execution model, from end to end, with code you can run |
+| [Architecture](docs/architecture.md) | The boundaries of ownership and the failure semantics |
+| [Configuration](docs/configuration.md) | The TOML keys, the precedence and the event envelopes |
+| [Control-plane API](docs/api.md) | The HTTP routes, the status codes and the SSE cursors |
+| [Client SDK](docs/client.md) | The typed flows to submit, inspect, control and stream |
+| [Operations](docs/operations.md) | How to install, serve, upgrade, back up and recover |
+| [Threat model](docs/threat-model.md) | The trust boundaries TM-1 to TM-9, and what they exclude |
+| [Isolation](docs/isolation.md) | The sandbox, the mounts and the output limits |
+| [Secrets](docs/secrets.md) | How to integrate a provider, and the limits of injection |
+| [Redaction](docs/redaction.md) | What Praxis removes before bytes leave the controller |
+| [Metrics](docs/metrics.md) | The stable metric names, units and label allowlists |
+| [Versions](docs/versions.md) | The version matrix for the wire and the storage, and the policy |
+| [Qualification](docs/qualification.md) | The v1.0.0 release evidence and the deployment limits |
 
-Start with [concepts](docs/concepts.md); read the [threat model](docs/threat-model.md)
-and [isolation](docs/isolation.md) before hosting native workloads.
+Start with [concepts](docs/concepts.md). Before you host native workloads, read
+the [threat model](docs/threat-model.md) and [isolation](docs/isolation.md).
 
 ## Development
 
@@ -201,15 +208,18 @@ uv run ruff check .
 uv run mypy            # strict, over src/
 ```
 
-The reproducible release gate builds an sdist, builds a wheel from it, installs that
-wheel into a fresh virtual environment with locked dependencies, verifies imports
-resolve to that installation, then runs the suite, lint, types, examples and CLI:
+The release gate is reproducible. It builds an sdist and then builds a wheel
+from it. It installs that wheel into a new virtual environment with locked
+dependencies. Then it makes sure that the imports come from that installation.
+Then it runs the test suite, the lint, the type checks, the examples and the
+CLI.
 
 ```sh
 uv run python scripts/qualify.py
 ```
 
-CI runs the source checks on Python 3.11–3.14 and the fresh-wheel gate on 3.12.
+CI runs the source checks on Python 3.11 to 3.14. It runs the fresh-wheel gate
+on 3.12.
 
 ## Layout
 
