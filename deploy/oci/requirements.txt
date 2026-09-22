@@ -1,0 +1,2 @@
+# Praxis runtime is stdlib-only; the ASGI server is a host dependency.
+uvicorn==0.34.0
