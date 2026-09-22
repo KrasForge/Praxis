@@ -1,0 +1,17 @@
+[tools]
+python = "3.12"
+uv = "0.8.22"
+
+[tasks.check]
+description = "Run the locked Praxis acceptance gate used by CI"
+run = [
+  "uv run --frozen pytest",
+  "uv run --frozen ruff check .",
+  "uv run --frozen mypy",
+  "uv run --frozen python examples/demo.py",
+  "uv run --frozen praxis --version",
+]
+
+[tasks.qualify]
+description = "Build and qualify an installed Praxis wheel in a clean environment"
+run = "uv run --frozen python scripts/qualify.py"
