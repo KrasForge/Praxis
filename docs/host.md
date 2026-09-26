@@ -39,12 +39,14 @@ is closed: unknown keys and unsafe combinations are rejected at load time.
 | `server.tls_certfile`, `server.tls_keyfile` | Serve HTTPS |
 | `server.tls_client_ca` | Require client certificates signed by this CA (mutual TLS) |
 | `server.tls_terminated_upstream` | TLS ends at a trusted proxy; enables proxy headers |
-| `[[clients]]` | `id`, `token_sha256`, `roles`, optional `delegate` |
+| `[[clients]]` | `id`, `token_sha256` (one digest, or a list of up to four during rotation), `roles`, optional `delegate` |
 | `noesis.base_url` | Noesis origin; must be `https` unless loopback |
 | `noesis.token_env` / `noesis.token_file` | Where the Noesis API key comes from (exactly one) |
 | `noesis.ca_file`, `noesis.client_certfile`, `noesis.client_keyfile` | Private CA and client certificate for Noesis |
 | `noesis.ingest_path` | Default `/documents/ingest` (Noesis `document-ingest-v1`) |
 | `noesis.publication` | `off`, `manual` (default) or `auto` |
+| `noesis.context_domains` | Optional allowlist of Noesis domains specs may request context from |
+| `[limits]` | Optional admission limits; see [Limits and deadlines](#limits-and-deadlines) |
 
 A non-loopback bind without local TLS is refused unless
 `tls_terminated_upstream = true` says a proxy owns TLS. Secrets are never
@@ -103,8 +105,13 @@ request context and receive it in `inputs["praxis.context"]` with provenance:
 ```
 
 A required dependency that Noesis cannot answer fails the process before execution.
-Noesis enforces its own domain authorization for the host's key. Scope that key to
-the domains Modulo users may read.
+
+Noesis does not yet scope API keys per domain (Ikey168/Noesis#1784), so any domain the
+host's key can read is reachable from any spec. Set `noesis.context_domains` to the
+domains Modulo users may read. A request for any other domain is answered locally as
+`unavailable` with reason `noesis_domain_not_allowed`, without contacting Noesis, and
+a required dependency then fails the process. Keep the allowlist even after Noesis
+enforces key scopes; it is the host's own statement of what tasks may read.
 
 ## Publishing results to Noesis
 
@@ -134,6 +141,57 @@ process, and `503` for `unavailable`. A publication left in progress by a crash 
 never retried automatically. Reconcile it with its deterministic `document_id` as
 described in [operations](operations.md#recovery).
 
+## Limits and deadlines
+
+```toml
+[limits]
+requests_per_minute = 120         # per acting identity: <client> or <client>/<user>
+client_requests_per_minute = 1200 # per client, all of its users together
+submit_per_minute = 20            # POST /v1/processes, per acting identity
+max_streams = 4                   # concurrent SSE streams per acting identity
+request_timeout_seconds = 30      # non-streaming requests
+exempt_admin = true               # the default
+```
+
+Every key is optional. Rates are token buckets that start full, so a rate of *N* per
+minute also allows a burst of *N*. A request over a limit gets `429` with
+`rate_limited` or `stream_limited` and a `Retry-After` header. A stream slot is
+released when its client disconnects or the process finishes. Unauthenticated requests
+are answered `401` without consuming anything. Limits live in memory; the host is a
+single controller.
+
+A request that exceeds `request_timeout_seconds` gets `503 request_timeout`, but the
+operation keeps running. Cancelling a submission, control or approval midway could
+leave kernel state half-applied, so only the response is abandoned. Clients re-inspect
+the process to learn the result. Counts of each rejection kind are kept in
+`HostApplication.limiter.rejections` and logged with the acting identity.
+
+## Reloading without a restart
+
+`SIGHUP` re-reads the config file given to `serve`, or `PRAXIS_HOST_CONFIG` under
+another ASGI server. It applies:
+
+- client tokens, roles and delegation;
+- the server certificate and key, and additional trusted client CAs (`serve` only);
+- the Noesis credential (from `token_file`; environment variables cannot change in a
+  running process), CA and client certificate, swapped as one transport;
+- `noesis.context_domains`.
+
+Everything is read and validated before anything changes, so an invalid file, an
+unreadable certificate or an empty credential leaves the running configuration in
+place. The result is logged either way. Changes to `data_dir`, `executors`, the bind
+address, the TLS mode, `[limits]` or the Noesis origin and publication mode are
+refused and need a restart.
+
+To rotate a client token without an outage:
+1. List both digests (`token_sha256 = ["<new>", "<old>"]`) and send `SIGHUP`.
+2. Move the client to the new token.
+3. Remove the old digest and send `SIGHUP` again. The old token is rejected from then on.
+
+New TLS handshakes use a reloaded certificate. Connections already open keep the
+certificate they negotiated. OpenSSL cannot remove a trusted CA from a live context,
+so dropping a client CA needs a restart.
+
 ## What Modulo calls
 
 Modulo's backend is one delegating client. For a signed-in user it sends the mTLS
@@ -155,7 +213,6 @@ authenticated itself: Praxis trusts the delegating client for that assertion.
 
 ## Not covered
 
-- Rate limits and request deadlines: put these in a proxy.
-- Revoking a token: remove or replace its digest and restart.
-- Rotating certificates: replace the files and restart.
+- Distributed rate limiting: limits are per host process.
+- Removing a trusted client CA without a restart.
 - Multi-controller placement: the host is one kernel owner, as in [operations](operations.md).

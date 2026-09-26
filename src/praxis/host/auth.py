@@ -50,9 +50,10 @@ class HostSecurity:
         presented = token_digest(token)
         client = None
         for candidate in self.config.clients:
-            # Compare against every client so timing does not reveal which digest matched.
-            if hmac.compare_digest(presented, candidate.token_sha256):
-                client = candidate
+            # Compare against every digest so timing does not reveal which one matched.
+            for digest in candidate.token_sha256:
+                if hmac.compare_digest(presented, digest):
+                    client = candidate
         if client is None:
             return None
         principal = headers.get(ON_BEHALF_OF)

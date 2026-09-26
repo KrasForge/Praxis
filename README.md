@@ -207,7 +207,7 @@ and [isolation](docs/isolation.md) before hosting native workloads.
 ## Development
 
 ```sh
-uv run pytest          # 394 tests
+uv run pytest          # 415 tests
 uv run ruff check .
 uv run mypy            # strict, over src/
 ```

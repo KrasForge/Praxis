@@ -15,6 +15,7 @@ tls_client_ca = "/etc/praxis/tls/internal-ca.pem"
 
 # Modulo's backend: acts for its signed-in users via X-Praxis-On-Behalf-Of.
 # Generate with: python -m praxis.host token --client modulo
+# To rotate, list both digests, SIGHUP, switch the client, drop the old one, SIGHUP.
 [[clients]]
 id = "modulo"
 token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -37,3 +38,13 @@ client_keyfile = "/etc/praxis/tls/praxis.key"
 ingest_path = "/documents/ingest"
 # off | manual (POST /v1/processes/{id}/publication) | auto (opt-in per submission)
 publication = "manual"
+# Domains tasks may read context from; others fail without contacting Noesis.
+context_domains = ["support"]
+
+# Per acting identity (<client> or <client>/<user>) unless named per client.
+[limits]
+requests_per_minute = 120
+client_requests_per_minute = 1200
+submit_per_minute = 20
+max_streams = 4
+request_timeout_seconds = 30

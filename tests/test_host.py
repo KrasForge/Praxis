@@ -258,7 +258,7 @@ def test_noesis_credentials_come_from_environment(tmp_path):
     with pytest.raises(ValueError, match="credential"):
         build_host(config(tmp_path), environ={})
     host = build_host(config(tmp_path), environ={"NOESIS_TOKEN": "nn_" + "k" * 32})
-    transport = host.context_providers["noesis"].transport
+    transport = host.noesis_transport.current
     assert transport.headers["Authorization"] == "Bearer nn_" + "k" * 32 and transport.ssl_context is not None
     host.close()
 

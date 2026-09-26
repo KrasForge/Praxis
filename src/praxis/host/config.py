@@ -28,7 +28,7 @@ class HostConfigError(ValueError):
 @dataclass(frozen=True)
 class ClientConfig:
     id: str
-    token_sha256: str
+    token_sha256: tuple[str, ...]  # several digests overlap during a rotation
     roles: frozenset[str]
     delegate: bool = False
 
@@ -58,6 +58,17 @@ class NoesisConfig:
     ingest_path: str = "/documents/ingest"
     publication: str = "manual"
     timeout_seconds: float = 15.0
+    context_domains: frozenset[str] | None = None  # None: every domain the Noesis key can read
+
+
+@dataclass(frozen=True)
+class LimitsConfig:
+    requests_per_minute: int | None = None
+    client_requests_per_minute: int | None = None
+    submit_per_minute: int | None = None
+    max_streams: int | None = None
+    request_timeout_seconds: float | None = None
+    exempt_admin: bool = True
 
 
 @dataclass(frozen=True)
@@ -67,6 +78,7 @@ class HostConfig:
     executors: frozenset[str] = frozenset({"fake"})
     server: ServerConfig = ServerConfig()
     noesis: NoesisConfig | None = None
+    limits: LimitsConfig = LimitsConfig()
 
     def client(self, identity: str) -> ClientConfig | None:
         return next((client for client in self.clients if client.id == identity), None)
@@ -82,7 +94,7 @@ def load_host_config(path: Path) -> HostConfig:
 
 
 def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
-    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis"})
+    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits"})
     data_dir = _path("data_dir", data.get("data_dir"))
     if data_dir is None:
         raise HostConfigError("data_dir", "required")
@@ -93,7 +105,7 @@ def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
     server = _server(data.get("server", {}))
     clients = _clients(data.get("clients"))
     noesis = None if "noesis" not in data else _noesis(data["noesis"])
-    return HostConfig(data_dir, clients, frozenset(executors), server, noesis)
+    return HostConfig(data_dir, clients, frozenset(executors), server, noesis, _limits(data.get("limits", {})))
 
 
 def is_loopback(host: str) -> bool:
@@ -141,25 +153,29 @@ def _clients(data: Any) -> tuple[ClientConfig, ...]:
         identity, digest, roles = item.get("id"), item.get("token_sha256"), item.get("roles")
         if not isinstance(identity, str) or not CLIENT_ID.fullmatch(identity):
             raise HostConfigError(field + ".id", "expected lowercase identifier")
-        if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-            raise HostConfigError(field + ".token_sha256", "expected lowercase SHA-256 hex digest")
+        digests = [digest] if isinstance(digest, str) else digest
+        if (not isinstance(digests, list) or not 1 <= len(digests) <= 4 or len(set(digests)) != len(digests)
+                or any(not isinstance(d, str) or not DIGEST.fullmatch(d) for d in digests)):
+            raise HostConfigError(field + ".token_sha256", "expected 1-4 lowercase SHA-256 hex digests")
         if (not isinstance(roles, list) or not roles or len(set(roles)) != len(roles)
                 or any(role not in ROLES for role in roles)):
             raise HostConfigError(field + ".roles", "expected unique roles from " + ", ".join(sorted(ROLES)))
         delegate = item.get("delegate", False)
         if type(delegate) is not bool:
             raise HostConfigError(field + ".delegate", "expected boolean")
-        clients.append(ClientConfig(identity, digest, frozenset(roles), delegate))
+        clients.append(ClientConfig(identity, tuple(digests), frozenset(roles), delegate))
     if len({c.id for c in clients}) != len(clients):
         raise HostConfigError("clients", "duplicate client id")
-    if len({c.token_sha256 for c in clients}) != len(clients):
+    digests = [d for c in clients for d in c.token_sha256]
+    if len(set(digests)) != len(digests):
         raise HostConfigError("clients", "duplicate client token")
     return tuple(clients)
 
 
 def _noesis(data: Any) -> NoesisConfig:
     _closed("noesis", data, {"base_url", "token_env", "token_file", "ca_file", "client_certfile",
-                             "client_keyfile", "ingest_path", "publication", "timeout_seconds"})
+                             "client_keyfile", "ingest_path", "publication", "timeout_seconds",
+                             "context_domains"})
     base_url = data.get("base_url")
     parsed = urlsplit(base_url) if isinstance(base_url, str) else None
     if (parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -187,8 +203,32 @@ def _noesis(data: Any) -> NoesisConfig:
         raise HostConfigError("noesis.client_keyfile", "requires client_certfile")
     if (client_cert is not None or data.get("ca_file") is not None) and parsed.scheme != "https":
         raise HostConfigError("noesis.base_url", "TLS settings require https")
+    domains = data.get("context_domains")
+    if domains is not None and (not isinstance(domains, list) or not domains or len(set(domains)) != len(domains)
+                                or any(not isinstance(d, str) or not d.strip() or "/" in d for d in domains)):
+        raise HostConfigError("noesis.context_domains", "expected unique nonempty domain names")
     return NoesisConfig(base_url.rstrip("/"), token_env, token_file, _path("noesis.ca_file", data.get("ca_file")),
-                        client_cert, client_key, ingest_path, publication, float(timeout))
+                        client_cert, client_key, ingest_path, publication, float(timeout),
+                        None if domains is None else frozenset(domains))
+
+
+def _limits(data: Any) -> LimitsConfig:
+    _closed("limits", data, {"requests_per_minute", "client_requests_per_minute", "submit_per_minute",
+                             "max_streams", "request_timeout_seconds", "exempt_admin"})
+    counts = {}
+    for key in ("requests_per_minute", "client_requests_per_minute", "submit_per_minute", "max_streams"):
+        value = data.get(key)
+        if value is not None and (type(value) is not int or not 1 <= value <= 1_000_000):
+            raise HostConfigError("limits." + key, "expected positive integer")
+        counts[key] = value
+    timeout = data.get("request_timeout_seconds")
+    if timeout is not None and (type(timeout) not in (int, float) or not 0 < timeout <= 3600):
+        raise HostConfigError("limits.request_timeout_seconds", "expected 0 < seconds <= 3600")
+    exempt = data.get("exempt_admin", True)
+    if type(exempt) is not bool:
+        raise HostConfigError("limits.exempt_admin", "expected boolean")
+    return LimitsConfig(**counts, request_timeout_seconds=None if timeout is None else float(timeout),
+                        exempt_admin=exempt)
 
 
 def _closed(field: str, data: Any, allowed: set[str]) -> None:

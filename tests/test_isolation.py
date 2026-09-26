@@ -61,3 +61,53 @@ def test_isolation_missing_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr("praxis.executors.isolation.shutil.which", lambda _: None)
     with pytest.raises(ValueError, match="isolation_unavailable"):
         LinuxIsolation().command(["true"], tmp_path)
+
+
+def test_executable_resolution_follows_every_symlink_hop(tmp_path):
+    from praxis.executors.isolation import LinuxIsolation
+    runtime, outside = tmp_path / "runtime", tmp_path / "outside"
+    (runtime / "bin").mkdir(parents=True)
+    outside.mkdir()
+    (runtime / "bin" / "real").write_text("#!/bin/true\n")
+    (outside / "tool").write_text("#!/bin/true\n")
+    (runtime / "bin" / "relative").symlink_to("real")
+    (runtime / "bin" / "absolute").symlink_to(runtime / "bin" / "real")
+    # Debian alternatives shape: the final target is mounted, an intermediate hop is not.
+    (outside / "alternative").symlink_to(runtime / "bin" / "real")
+    (runtime / "bin" / "via-outside").symlink_to(outside / "alternative")
+    (runtime / "bin" / "escape").symlink_to(outside / "tool")
+    (runtime / "bin" / "loop").symlink_to("loop")
+    isolation = LinuxIsolation(runtime_roots=(runtime,))
+    real = runtime / "bin" / "real"
+    assert isolation.executable_path(str(real)) == (real, real)
+    assert isolation.executable_path(str(runtime / "bin" / "relative"))[0] == real
+    assert isolation.executable_path(str(runtime / "bin" / "absolute"))[0] == real
+    assert isolation.executable_path(str(runtime / "bin" / "via-outside")) == (None, outside / "alternative")
+    assert isolation.executable_path(str(runtime / "bin" / "escape")) == (None, outside / "tool")
+    assert isolation.executable_path(str(runtime / "bin" / "loop"))[0] is None
+    assert isolation.executable_path(str(runtime / "bin" / "missing"))[0] is None
+    assert isolation.executable_path(sys.executable)[0] is None  # not under these roots
+    assert LinuxIsolation().executable_path(sys.executable)[0] is not None  # default roots
+
+
+def test_unreachable_executable_fails_before_launch(tmp_path, caplog):
+    import shutil
+
+    from praxis.executors.isolation import LinuxIsolation
+    runtime, outside = tmp_path / "runtime", tmp_path / "outside"
+    runtime.mkdir()
+    outside.mkdir()
+    shutil.copy("/bin/true" if not sys.platform.startswith("win") else sys.executable, outside / "tool")
+    (runtime / "tool").symlink_to(outside / "tool")
+
+    async def exercise():
+        provider = LocalWorkspaces(tmp_path / "work")
+        handle = provider.create("p")
+        executor = LocalProcessExecutor(provider, isolation=LinuxIsolation(runtime_roots=(runtime,)))
+        spec = ProcessSpec("run", "local", inputs={"argv": [str(runtime / "tool")]})
+        control = await executor.start(ExecutionRequest("p", "a", spec, handle.workspace_id,
+                                                        provider.path_for(handle, "p")))
+        assert (control.applied, control.reason) == (False, "executable_not_in_sandbox")
+        assert "a" not in executor.processes  # nothing was launched
+    asyncio.run(exercise())
+    assert str(outside / "tool") in caplog.text
