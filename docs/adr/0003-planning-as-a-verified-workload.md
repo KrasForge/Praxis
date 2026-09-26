@@ -1,6 +1,6 @@
 # 0003. Planning runs as a verified workload
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Supersedes:** none
 

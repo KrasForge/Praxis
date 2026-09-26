@@ -1,6 +1,6 @@
 # 0001. Effect adapters and the host effect pipeline
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Supersedes:** none
 

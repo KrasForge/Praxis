@@ -1,6 +1,6 @@
 # 0002. Effect approval policy and approver authority
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Supersedes:** none
 

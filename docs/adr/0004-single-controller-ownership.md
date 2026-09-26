@@ -1,6 +1,6 @@
 # 0004. A single controller owns each store
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Supersedes:** none
 
