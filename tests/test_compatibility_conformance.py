@@ -12,6 +12,7 @@ from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
 from praxis.kernel.effects import file_write
 from praxis.kernel.events import Event
+from praxis.kernel.proposals import parse_proposal
 from praxis.kernel.lifecycle import State
 from praxis.kernel.results import ProcessResult
 from praxis.kernel.runtime import Kernel
@@ -27,6 +28,9 @@ MODELS = {
     "capability": Capability(Resource.SECRET, frozenset({"read"}), "secret", "kernel", "p"),
     "contract": Contract(), "effect": file_write("p", "a", "/tmp/result", b"result"),
     "worker": Worker("w", "owner", "boot"),
+    "effect_proposal": parse_proposal(".praxis/effects/a.json", json.dumps({
+        "schema": "praxis.effect-proposal", "schema_version": 1, "kind": "message_send",
+        "target": "ops", "payload": {"text": "t"}})),
 }
 
 

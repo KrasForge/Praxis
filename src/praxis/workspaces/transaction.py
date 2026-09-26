@@ -6,6 +6,7 @@ revision directories remain available after the current pointer is replaced.
 
 import fcntl
 import hashlib
+import json
 import os
 import shutil
 from collections.abc import Iterable
@@ -13,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from praxis.kernel.events import Event
+from praxis.kernel.proposals import RESERVED_PREFIX, published
 from praxis.validators.policy import VerificationReport
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import Snapshot, WorkspaceError, WorkspaceHandle
@@ -39,6 +41,12 @@ def staged_transactions(events: Iterable[Event]) -> tuple[dict[str, dict[str, ob
             pending.pop(event.process_id, None)
             abandoned.pop(event.process_id, None)
     return pending, abandoned
+
+
+def publication_id(snapshot: Snapshot) -> str:
+    """Identity of a snapshot's published part: the manifest without reserved entries."""
+    entries = [list(entry) for entry in snapshot.files if published(entry[0])]
+    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
 
 
 class CanonicalDirectory:
@@ -136,7 +144,11 @@ class WorkspaceTransaction:
             version.mkdir()
             source = self.provider.path_for(self.handle, self.handle.process_id)
             shutil.copytree(source, version / "tree", symlinks=True)
-            if self._snapshot_tree(version / "tree").snapshot_id != snapshot.snapshot_id:
+            # Kernel-reserved files (effect proposals) are never published.
+            reserved = version / "tree" / RESERVED_PREFIX.rstrip("/")
+            if reserved.is_dir() and not reserved.is_symlink():
+                shutil.rmtree(reserved)
+            if self._snapshot_tree(version / "tree").snapshot_id != publication_id(snapshot):
                 raise WorkspaceError("staged_workspace_changed")
             event = Event(self.handle.process_id, "workspace.committed", {
                 "workspace_id": self.handle.workspace_id, "snapshot_id": snapshot.snapshot_id,

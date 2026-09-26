@@ -3,6 +3,7 @@
 from typing import Any
 
 from praxis.kernel.budgets import RESOURCES
+from praxis.kernel.effect_service import EffectService
 from praxis.kernel.lifecycle import TERMINAL, State
 from praxis.kernel.runtime import Kernel
 from praxis.kernel.scheduler import Scheduler
@@ -11,11 +12,18 @@ from praxis.storage.protocol import ProcessStore
 
 
 class RuntimeHealth:
-    def __init__(self, kernel: Kernel, scheduler: Scheduler | None = None, workers: Heartbeats | None = None):
-        self.kernel, self.scheduler, self.workers = kernel, scheduler, workers
+    def __init__(self, kernel: Kernel, scheduler: Scheduler | None = None, workers: Heartbeats | None = None,
+                 effects: EffectService | None = None):
+        self.kernel, self.scheduler, self.workers, self.effects = kernel, scheduler, workers, effects
 
-    def blocking_reason(self, process_id: str) -> str | None:
+    def uncertain_effects(self) -> set[str]:
+        """Processes with an effect left in ``applying``: reconcile, never retry."""
+        return set() if self.effects is None else {effect.process_id for effect in self.effects.in_flight()}
+
+    def blocking_reason(self, process_id: str, uncertain: set[str] | None = None) -> str | None:
         process = self.kernel.processes[process_id]
+        if process_id in (self.uncertain_effects() if uncertain is None else uncertain):
+            return "effect_uncertain"
         if process.state in TERMINAL:
             return None
         if process.state == State.SUSPENDED:
@@ -36,8 +44,9 @@ class RuntimeHealth:
     def snapshot(self) -> dict[str, Any]:
         blocked = []
         pressure = []
+        uncertain = self.uncertain_effects()
         for identity, process in self.kernel.processes.items():
-            reason = self.blocking_reason(identity)
+            reason = self.blocking_reason(identity, uncertain)
             if reason:
                 blocked.append({"process_id": identity, "reason": reason})
             if process.state not in TERMINAL:

@@ -3,7 +3,7 @@
 from types import MappingProxyType
 
 VERSIONS = MappingProxyType({name: frozenset({1}) for name in (
-    "process_spec", "process_result", "event", "executor", "workspace", "capability", "contract", "effect", "worker")})
+    "process_spec", "process_result", "event", "executor", "workspace", "capability", "contract", "effect", "effect_proposal", "worker")})
 
 
 class CompatibilityError(ValueError):

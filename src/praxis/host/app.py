@@ -24,10 +24,13 @@ from praxis.executors.local import LocalProcessExecutor
 from praxis.executors.protocol import Executor
 from praxis.host.auth import HostSecurity
 from praxis.host.config import HostConfig, HostConfigError, NoesisConfig, load_host_config
+from praxis.host.effects import HostEffects, build_adapters
 from praxis.host.limits import Limiter, Rejection
 from praxis.host.publisher import TARGET, Publisher, PublicationWorker, result_payload
 from praxis.kernel.authority import Authority
-from praxis.kernel.effect_service import EffectService
+from praxis.effects import require_reconcilable
+from praxis.kernel.effect_service import EffectAdapter, EffectService
+from praxis.kernel.effects import Effect, EffectKind
 from praxis.kernel.lifecycle import TERMINAL
 from praxis.kernel.runtime import Kernel
 from praxis.knowledge.context import ContextProvider, ContextRequest, ContextResponse
@@ -49,10 +52,14 @@ class HostControlPlane(ControlPlane):
     """Submission also records publication intent for clients allowed to publish."""
 
     def __init__(self, kernel: Kernel, effects: EffectService, config: HostConfig,
-                 publisher: Publisher | None):
+                 publisher: Publisher | None, policy: HostEffects | None = None):
         super().__init__(kernel, effects)
         self.config = config
         self.publisher = publisher
+        self.policy = policy
+
+    def approval_expiry(self, effect: Effect) -> str | None:
+        return None if self.policy is None else self.policy.expires_at(effect)
 
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *,
                actor: str = "kernel") -> dict[str, Any]:
@@ -274,7 +281,7 @@ def restart_key(config: HostConfig) -> tuple[Any, ...]:
     noesis = config.noesis
     return (config.data_dir, config.executors, config.server.host, config.server.port, config.server.tls,
             config.server.tls_client_ca is not None, config.server.tls_terminated_upstream, config.limits,
-            config.retention,
+            config.retention, config.effects,
             None if noesis is None else (noesis.base_url, noesis.ingest_path, noesis.publication))
 
 
@@ -317,8 +324,8 @@ class Host:
                 raise HostConfigError("reload", "host was not started from a config file")
             config = load_host_config(self.config_path)
         if restart_key(config) != restart_key(self.config):
-            raise HostConfigError("reload", "data_dir, executors, bind, TLS mode, limits and Noesis "
-                                  "origin/publication changes require a restart")
+            raise HostConfigError("reload", "data_dir, executors, bind, TLS mode, limits, retention, effect "
+                                  "adapters and Noesis origin/publication changes require a restart")
         changes = []
         transport, token = None, None
         if config.noesis is not None and self.noesis_transport is not None and self.rebuild_noesis:
@@ -337,12 +344,16 @@ class Host:
             changes.append("noesis credentials")
         if config.clients != self.config.clients:
             changes.append("clients")
+        if config.effect_policy != self.config.effect_policy:
+            changes.append("effect policy")
         new_domains = None if config.noesis is None else config.noesis.context_domains
         scoped = self.context_providers.get("noesis")
         if isinstance(scoped, DomainScopedProvider) and scoped.domains != new_domains:
             scoped.domains = new_domains
             changes.append("context domains")
         self.security.config = self.control.config = self.config = config
+        if self.control.policy is not None:
+            self.control.policy.config = config
         logger.info("host configuration reloaded: %s", ", ".join(changes) or "no changes")
         return changes
 
@@ -397,10 +408,12 @@ def retention_sweep(config: HostConfig, store: SQLiteStore, workspaces: LocalWor
 def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
                executors: Mapping[str, Executor] | None = None,
                noesis_transport: JSONTransport | None = None,
-               config_path: Path | None = None) -> Host:
+               config_path: Path | None = None,
+               effect_adapters: Mapping[EffectKind, EffectAdapter] | None = None) -> Host:
     """Assemble a recovered kernel and its ASGI app. Extra ``executors`` (agent adapters
     inside isolated workers) are registered alongside the configured built-ins. With
-    ``config_path`` the app reloads that file on SIGHUP."""
+    ``config_path`` the app reloads that file on SIGHUP. Extra ``effect_adapters`` join
+    the configured ones under the same rule: an irreversible kind needs a lookup."""
     env = os.environ if environ is None else environ
     root = Path(config.data_dir).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -429,14 +442,31 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
         providers["noesis"] = DomainScopedProvider(NoesisContextProvider(transport), config.noesis.context_domains)
     kernel = Kernel(store, workspaces, registry, authority=authority, context_providers=providers)
     kernel.recover_records()
+    security = HostSecurity(config, kernel)
+    policy = HostEffects(kernel, config, security.owner)
+    effects = EffectService(store, authority, approvers=policy)
+    policy.service = effects
+    adapters = build_adapters(config, kernel, lambda: effects, env, redaction)
+    for kind, adapter in (effect_adapters or {}).items():
+        if kind in adapters:
+            raise ValueError(f"effect adapter for {kind.value} is already configured")
+        adapters[kind] = adapter
+    require_reconcilable(adapters)
+    effects.adapters = adapters
+    kernel.proposal_sink = policy
+    for process_id, proposed in kernel.proposals():
+        # Idempotent: effects staged before the restart are found by their key.
+        policy.propose(process_id, proposed)
+    for effect in effects.in_flight():
+        logger.warning("effect %s of process %s is uncertain; reconcile it, it is never retried",
+                       effect.effect_id, effect.process_id)
     publisher = worker = None
     if config.noesis is not None and transport is not None and config.noesis.publication != "off":
         exporter = NoesisExporter(transport, config.noesis.ingest_path)
         publisher = Publisher(kernel, store, authority, PublicationService(store, authority, exporter, target=TARGET))
         if config.noesis.publication == "auto":
             worker = PublicationWorker(publisher)
-    security = HostSecurity(config, kernel)
-    control = HostControlPlane(kernel, EffectService(store, authority), config, publisher)
+    control = HostControlPlane(kernel, effects, config, publisher, policy)
     limits = config.limits
     limited = any(v is not None for v in (limits.requests_per_minute, limits.client_requests_per_minute,
                                          limits.submit_per_minute, limits.max_streams,

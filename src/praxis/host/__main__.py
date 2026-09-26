@@ -40,7 +40,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config.noesis is not None:
         files += [config.noesis.token_file, config.noesis.ca_file, config.noesis.client_certfile,
                   config.noesis.client_keyfile]
+    for entry in config.effects:
+        files += [entry.token_file, entry.ca_file, entry.client_certfile, entry.client_keyfile]
     missing = [name for name in dict.fromkeys(files) if name is not None and not Path(name).is_file()]
+    missing += [path for entry in config.effects for _, path in entry.repositories if not Path(path).is_dir()]
     if missing:
         print("missing files: " + ", ".join(missing), file=sys.stderr)
         return 2
@@ -68,7 +71,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         publication = "disabled" if config.noesis is None else config.noesis.publication
         domains = ("" if config.noesis is None or config.noesis.context_domains is None
                    else f", context domains {', '.join(sorted(config.noesis.context_domains))}")
-        print(f"ok: {len(config.clients)} client(s), {tls}, Noesis publication {publication}{domains}")
+        effects = (f", {len(config.effect_policy)} effect rule(s), adapters for "
+                   f"{', '.join(e.kind for e in config.effects) or 'no kinds'}")
+        print(f"ok: {len(config.clients)} client(s), {tls}, Noesis publication {publication}{domains}{effects}")
         return 0
     try:
         uvicorn = importlib.import_module("uvicorn")

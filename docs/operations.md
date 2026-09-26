@@ -92,8 +92,10 @@ For a remote assignment, use the detection of OrphanRecovery and its positive
 identity of the process, but they allocate a new attempt ID. A heartbeat that
 timed out is not confirmation that the work stopped.
 
-Inspect the effects that are applying or uncertain. Reconcile them with their
-idempotency receipts before a retry. Never repeat a non-replayable effect
+Inspect the effects that are applying or uncertain. The host reports each one
+as `effect_uncertain` in `GET /v1/health`. Reconcile them with their
+idempotency receipts before a retry, through
+`POST /v1/processes/{id}/effects/{effect_id}/reconcile`. Never repeat a non-replayable effect
 blindly. Inspect the `workspace.committed` receipts and the history of the
 canonical pointer. After a canonical commit, Praxis blocks a replay. Attach the
 canonical targets and the scheduler policy of the host deliberately.

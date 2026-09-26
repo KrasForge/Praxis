@@ -163,6 +163,25 @@ approval. Model output that *describes* an effect does nothing. An approval is
 bound to an attempt and to a version. Thus a stale approval cannot authorize new
 work.
 
+A workload does not stage an effect. It **proposes** one: it writes a
+`praxis.effect-proposal` v1 document under `.praxis/effects/` in its workspace.
+
+```json
+{"schema": "praxis.effect-proposal", "schema_version": 1,
+ "kind": "message_send", "target": "ops", "payload": {"text": "released"}}
+```
+
+The kernel reads the proposals from the verified snapshot, and only when the
+process completes. A process that fails verification proposes nothing. One
+invalid proposal rejects them all. Identities, authority, status and version
+belong to the kernel, so a proposal that names one is rejected. An
+`artifact_publish` proposal names `artifact_path`, a file of the workspace; the
+kernel binds it to the verified snapshot and records its digest. Nothing under
+`.praxis/` is published to a canonical directory. The kernel hands the effects
+to a `ProposalSink`, and the host stages them under its
+[approval policy](host.md#effects-and-approvals). See
+[ADR 0001](adr/0001-effect-adapters.md).
+
 An acknowledgement that Praxis lost is the difficult condition. The `applying`
 state is **uncertain**. It is never proof that the effect did not occur. Before
 you retry, reconcile with the idempotency receipt of the effect. Never repeat a
