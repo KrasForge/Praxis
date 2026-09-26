@@ -13,7 +13,7 @@ Praxis is a library and an ASGI service, not an application. Modulo owns the
 interface for people. Noesis owns knowledge. Adapters hold the code for each
 model; the kernel does not.
 
-- **Status:** v1.1.0, with v1 wire contracts and SQLite layout 2. The
+- **Status:** v1.2.0, with v1 wire contracts and SQLite layout 2. The
   [qualification report](docs/qualification.md) gives the coverage and the
   deployment limits.
 - **Requires:** Python 3.11 to 3.14. Local sandboxed execution needs Linux and
@@ -206,7 +206,7 @@ The index is in [docs/](docs/README.md).
 | [Redaction](docs/redaction.md) | What Praxis removes before bytes leave the controller |
 | [Metrics](docs/metrics.md) | The stable metric names, units and label allowlists |
 | [Versions](docs/versions.md) | The version matrix for the wire and the storage, and the policy |
-| [Qualification](docs/qualification.md) | The v1.1.0 release evidence and the deployment limits |
+| [Qualification](docs/qualification.md) | The v1.2.0 release evidence and the deployment limits |
 | [Acceptance](docs/acceptance.md) | The opt-in live checks against real providers, and their records |
 
 Start with [concepts](docs/concepts.md). Before you host native workloads, read
@@ -215,7 +215,8 @@ the [threat model](docs/threat-model.md) and [isolation](docs/isolation.md).
 ## Development
 
 ```sh
-uv run pytest          # 415 tests
+uv run pytest          # 440 tests
+uv run pytest acceptance -rs   # opt-in live checks; see docs/acceptance.md
 uv run ruff check .
 uv run mypy            # strict, over src/
 ```

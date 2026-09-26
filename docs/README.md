@@ -28,7 +28,7 @@ duties of a host that keeps it true.
 | [Operations](operations.md) | How to install, serve, register executors, upgrade, back up and recover. |
 | [Host](host.md) | The deployment host for Modulo and Noesis: client authentication, mutual TLS, context and publication triggers. |
 | [Metrics](metrics.md) | The stable metric catalog: the names, units, kinds and label allowlists. |
-| [Qualification](qualification.md) | The v1.1.0 release evidence, the reproducible gate and the deployment limits. |
+| [Qualification](qualification.md) | The v1.2.0 release evidence, the reproducible gate and the deployment limits. |
 | [Acceptance](acceptance.md) | The opt-in live checks against Codex, Claude, DeepSeek, Noesis and a deployed host, and their records. |
 
 ## Security
