@@ -114,8 +114,9 @@ after it writes the children. These regressions run in the full gate.
   restore that Praxis does not support stays explicit. The overhead of a native
   launch, and the startup of a provider, still need deadlines from the host.
 - CanonicalDirectory is a managed store of versions. It is not a general
-  transaction manager for Git. Praxis does not rebuild the staged candidate
-  transaction objects after a restart. The readiness of a graph, and the
+  transaction manager for Git. Praxis rebuilds a staged candidate transaction
+  after a restart only when it can still commit the verified snapshot; otherwise
+  it abandons the transaction. The readiness of a graph, and the
   scheduling of a distributed API, need orchestration from the host.
 - These conditions need reconciliation: an uncertain effect that you cannot
   replay; remote work with no fence; a canonical revision that Praxis committed;

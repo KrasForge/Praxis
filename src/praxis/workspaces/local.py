@@ -95,6 +95,21 @@ class LocalWorkspaces:
         (snapshots / identity).write_bytes(manifest)
         return Snapshot(handle.workspace_id, identity, tuple(entries))
 
+    def load_snapshot(self, workspace_id: str, snapshot_id: str) -> Snapshot:
+        """Read a recorded manifest back, refusing one whose bytes or blobs changed."""
+        try:
+            manifest = (self.root / "snapshots" / snapshot_id).read_bytes()
+            if hashlib.sha256(manifest).hexdigest() != snapshot_id:
+                raise WorkspaceError("corrupt snapshot")
+            entries = tuple((str(relative), str(digest)) for relative, digest in json.loads(manifest))
+            for _, digest in entries:
+                blob = (self.root / "blobs" / digest).read_bytes()
+                if hashlib.sha256(blob).hexdigest() != digest:
+                    raise WorkspaceError("corrupt snapshot blob")
+        except (OSError, ValueError, TypeError) as exc:
+            raise WorkspaceError("snapshot unavailable") from exc
+        return Snapshot(workspace_id, snapshot_id, entries)
+
     def diff(self, handle: WorkspaceHandle, baseline: Snapshot) -> WorkspaceDiff:
         if baseline.workspace_id != handle.workspace_id:
             raise WorkspaceError("snapshot workspace mismatch")

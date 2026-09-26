@@ -98,9 +98,33 @@ blindly. Inspect the `workspace.committed` receipts and the history of the
 canonical pointer. After a canonical commit, Praxis blocks a replay. Attach the
 canonical targets and the scheduler policy of the host deliberately.
 
-Praxis does not rebuild the staged candidate transactions that were in memory.
-The bytes that remain are material for diagnosis and recovery. They are not
-permission to publish.
+### Staged candidate transactions
+
+A verified candidate that waits for selection has a staged transaction. Praxis
+records it in a `transaction.staged` event. `recover_records()` rebuilds the
+transaction only when all of these conditions are true:
+
+- The process completed, and verification approved the staged snapshot.
+- The canonical directory still exists, and its current revision is still the
+  baseline revision. Recovery does not make a missing canonical directory.
+- The retained workspace still gives the verified snapshot.
+- The baseline manifest and its blobs are still present, for a rollback.
+
+Praxis then records `transaction.recovered`, and `commit_selected` can publish
+the candidate. The commit checks the snapshot and the baseline again, under the
+canonical lock.
+
+If a condition is false, Praxis records `transaction.abandoned` with one of
+these reasons: `process_not_completed`, `verification_unavailable`,
+`canonical_missing`, `stale_baseline`, `snapshot_missing`,
+`snapshot_mismatch` or `baseline_missing`. `commit_selected` then refuses the
+candidate with `staged_transaction_abandoned`, after this restart and after all
+later restarts. To publish the work, run the candidate again against the current
+canonical revision. The retained bytes are material for diagnosis only.
+
+A journal from a release before 1.2.0 has no `transaction.staged` events.
+Praxis cannot rebuild the transactions of those candidates. Do not select a
+candidate that was staged before the upgrade: run it again.
 
 A crash of the controller can leave a Noesis publication `in_progress`. An
 operator must then reconcile it with the deterministic document ID. Do this

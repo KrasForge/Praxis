@@ -113,6 +113,8 @@ class Speculation:
         if report is None or not report.approved:
             raise ValueError("candidate_not_verified")
         self.kernel.authority.require(process_id, Resource.WORKSPACE, "commit", process_id)
+        if process_id in self.kernel.abandoned_transactions:
+            raise ValueError("staged_transaction_abandoned")
         transaction = self.kernel.staged_transactions.get(process_id)
         if process_id in self.kernel.canonical_targets and transaction is None:
             raise ValueError("staged_transaction_unavailable")

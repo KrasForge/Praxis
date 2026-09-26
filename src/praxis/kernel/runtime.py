@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import time
+from pathlib import Path
 from uuid import uuid4
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -35,7 +36,7 @@ from praxis.validators.policy import VerificationReport, evaluate
 from praxis.validators.protocol import CheckResult, CheckStatus, ValidationInput, Validator
 from praxis.workspaces.transaction import CanonicalDirectory, WorkspaceTransaction
 from praxis.workspaces.local import LocalWorkspaces
-from praxis.workspaces.protocol import WorkspaceHandle
+from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
 
 
 class ProcessSignal(str, Enum):
@@ -78,6 +79,8 @@ class Kernel:
         self.canonical_targets: dict[str, CanonicalDirectory] = {}
         self.deferred_commits: set[str] = set()
         self.staged_transactions: dict[str, WorkspaceTransaction] = {}
+        # Staged transactions recovery refused to rebuild, by reason. They can never commit.
+        self.abandoned_transactions: dict[str, str] = {}
         self.retain_workspaces = retain_workspaces
         self.processes: dict[str, Process] = {}
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
@@ -224,6 +227,9 @@ class Kernel:
                     result = Outcome(OutcomeStatus.PARTIAL, "remote_generation_fenced")
                 if verified and transaction is not None and process.process_id in self.deferred_commits:
                     self.staged_transactions[process.process_id] = transaction
+                    self.events.append(Event(process.process_id, "transaction.staged", {
+                        **transaction.record(report.snapshot_id), "attempt_id": process.attempt_id,
+                    }, parent_id=process.parent_id))
                 elif verified and transaction is not None:
                     self.authority.require(process.process_id, Resource.WORKSPACE, "commit", process.process_id)
                     self.authority.require(process.process_id, Resource.FILESYSTEM, "write", str(transaction.canonical.root))
@@ -462,6 +468,78 @@ class Kernel:
                     self.verification[result.process_id] = result.verification
             elif event.type == "process.outcome":
                 self.results[event.process_id] = Outcome.from_json(json.dumps(event.payload))
+        self._recover_transactions()
+
+    def _recover_transactions(self) -> None:
+        """Rebuild staged candidate transactions that can still commit exactly what was verified.
+
+        A transaction is pending from its transaction.staged event until the journal shows
+        it committed, rolled back, released or abandoned. Each pending one is rebuilt only
+        when its process completed with approved verification of the staged snapshot, its
+        canonical store still points at the baseline revision, the retained workspace still
+        hashes to that snapshot, and the baseline manifest survives for rollback. Anything
+        else is journaled as abandoned and refused at commit.
+        """
+        pending: dict[str, dict[str, object]] = {}
+        for event in self.events:
+            if event.type == "transaction.staged":
+                pending[event.process_id] = dict(event.payload)
+                self.abandoned_transactions.pop(event.process_id, None)
+            elif event.type == "transaction.abandoned":
+                # Stays refused across every later restart, not only the one that found it.
+                pending.pop(event.process_id, None)
+                self.abandoned_transactions[event.process_id] = str(event.payload.get("reason"))
+            elif event.type in ("workspace.committed", "workspace.rolled_back", "candidate.released"):
+                pending.pop(event.process_id, None)
+                self.abandoned_transactions.pop(event.process_id, None)
+        for process_id, record in pending.items():
+            process = self.processes.get(process_id)
+            snapshot_id = str(record.get("snapshot_id"))
+            workspace_id = str(record.get("workspace_id"))
+            reason = None
+            report = self.verification.get(process_id)
+            if process is None or process.state != State.COMPLETED or record.get("attempt_id") != process.attempt_id:
+                reason = "process_not_completed"
+            elif report is None or report.approved is not True or report.snapshot_id != snapshot_id:
+                reason = "verification_unavailable"
+            else:
+                try:
+                    canonical = CanonicalDirectory.open(Path(str(record["canonical_root"])))
+                except (WorkspaceError, OSError, KeyError):
+                    reason = "canonical_missing"
+                else:
+                    if canonical.revision != record.get("baseline_revision"):
+                        reason = "stale_baseline"
+            if reason is None:
+                handle = WorkspaceHandle(workspace_id, process_id, "local")
+                try:
+                    staged = self.workspaces.snapshot(handle)
+                except WorkspaceError:
+                    staged = None
+                if staged is None:
+                    reason = "snapshot_missing"
+                elif staged.snapshot_id != snapshot_id:
+                    reason = "snapshot_mismatch"
+                else:
+                    try:
+                        baseline = self.workspaces.load_snapshot(workspace_id, str(record.get("baseline_snapshot_id")))
+                    except WorkspaceError:
+                        reason = "baseline_missing"
+            if reason is not None:
+                self.abandoned_transactions[process_id] = reason
+                self.events.append(Event(process_id, "transaction.abandoned", {
+                    "reason": reason, "workspace_id": workspace_id, "snapshot_id": snapshot_id,
+                }, parent_id=None if process is None else process.parent_id))
+                continue
+            assert process is not None
+            self.handles[process_id] = handle
+            self.canonical_targets[process_id] = canonical
+            self.staged_transactions[process_id] = WorkspaceTransaction.resume(
+                self.workspaces, handle, canonical, str(record["baseline_revision"]), baseline)
+            self.events.append(Event(process_id, "transaction.recovered", {
+                "workspace_id": workspace_id, "snapshot_id": snapshot_id,
+                "baseline_revision": str(record["baseline_revision"]),
+            }, parent_id=process.parent_id))
 
     def report_usage(self, process_id: str, attempt_id: str, usage_id: str, values: dict[str, int]) -> None:
         process = self.processes[process_id]
