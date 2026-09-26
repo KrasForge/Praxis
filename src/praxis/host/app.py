@@ -6,12 +6,13 @@ trigger, and client authentication. ``create_app`` is the ASGI factory for serve
 """
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import signal
 import ssl
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -329,10 +330,17 @@ class Host:
     config_path: Path | None = None
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     server_ssl: ssl.SSLContext | None = None
+    # New handshakes switch to this context, built from the current configuration.
+    current_ssl: ssl.SSLContext | None = None
+    # Open server transports, so a reload can close clients of a CA that was removed.
+    connections: Callable[[], Iterable[asyncio.BaseTransport]] | None = None
+    lock: Any = None
     live: dict[str, HostConfig] = field(default_factory=dict)
 
     def close(self) -> None:
         self.store.close()
+        release_controller(self.lock)
+        self.lock = None
 
     def sweep(self, *, apply: bool) -> RetentionReport:
         """Run retention against this host's data with its live journal."""
@@ -358,13 +366,19 @@ class Host:
         if config.noesis is not None and self.noesis_transport is not None and self.rebuild_noesis:
             token = noesis_token(config.noesis, self.environ)
             transport = noesis_http_transport(config.noesis, token)
+        fresh = None
         if self.server_ssl is not None and config.server.tls_certfile is not None:
-            # The live context serves new handshakes with the new certificate. Trusted client
-            # CAs can be added this way but not removed; dropping a CA requires a restart.
+            fresh = server_ssl_context(config)  # built first: a bad file changes nothing
+        if self.server_ssl is not None and fresh is not None and config.server.tls_certfile is not None:
+            # A context cannot forget a CA, so every new handshake switches to a fresh one.
             self.server_ssl.load_cert_chain(config.server.tls_certfile, config.server.tls_keyfile)
-            if config.server.tls_client_ca is not None:
-                self.server_ssl.load_verify_locations(cafile=config.server.tls_client_ca)
+            self.current_ssl = fresh
+            self.server_ssl.sni_callback = self._select_context
             changes.append("server certificate")
+            if config.server.tls_client_ca is not None and self.connections is not None:
+                closed = close_untrusted(self.connections(), fresh)
+                if closed:
+                    changes.append(f"closed {closed} connection(s) from removed client CAs")
         if transport is not None and token is not None and self.noesis_transport is not None:
             self.redaction.register(token)
             self.noesis_transport.current = transport
@@ -387,11 +401,74 @@ class Host:
         logger.info("host configuration reloaded: %s", ", ".join(changes) or "no changes")
         return changes
 
+    def _select_context(self, connection: ssl.SSLObject, name: str | None, context: ssl.SSLContext) -> None:
+        if self.current_ssl is not None:
+            connection.context = self.current_ssl
+
     def reload_from_signal(self) -> None:
         try:
             self.reload()
         except Exception as exc:
             logger.error("host configuration reload rejected; keeping the running configuration: %s", exc)
+
+
+class ControllerLocked(RuntimeError):
+    code = "controller_locked"
+
+
+def acquire_controller(data_dir: Path) -> Any:
+    """Hold the data directory for this process (ADR 0004). The kernel releases a
+    ``flock`` when the process dies, so a crash never blocks the next start."""
+    handle = (data_dir / "controller.lock").open("a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise ControllerLocked(f"another controller holds {data_dir}; one controller owns one store") from None
+    return handle
+
+
+def release_controller(handle: Any) -> None:
+    if handle is not None and not handle.closed:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def controller_running(data_dir: Path) -> bool:
+    if not (data_dir / "controller.lock").exists():
+        return False
+    try:
+        release_controller(acquire_controller(data_dir))
+    except ControllerLocked:
+        return True
+    return False
+
+
+def server_ssl_context(config: HostConfig) -> ssl.SSLContext:
+    server = config.server
+    assert server.tls_certfile is not None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(server.tls_certfile, server.tls_keyfile)
+    if server.tls_client_ca is not None:
+        context.load_verify_locations(cafile=server.tls_client_ca)
+        context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+def close_untrusted(transports: Iterable[asyncio.BaseTransport], context: ssl.SSLContext) -> int:
+    """Close connections whose client certificate issuer is no longer a trusted CA."""
+    trusted = {tuple(tuple(part) for part in ca["subject"]) for ca in context.get_ca_certs()}
+    closed = 0
+    for transport in list(transports):
+        connection = transport.get_extra_info("ssl_object")
+        peer = None if connection is None else connection.getpeercert()
+        if not peer or "issuer" not in peer:
+            continue
+        if tuple(tuple(part) for part in peer["issuer"]) not in trusted:
+            transport.close()
+            closed += 1
+    return closed
 
 
 def noesis_token(config: NoesisConfig, environ: Mapping[str, str]) -> str:
@@ -451,6 +528,17 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
     env = os.environ if environ is None else environ
     root = Path(config.data_dir).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = acquire_controller(root)
+    try:
+        return _build_host(config, root, lock, env, executors, noesis_transport, config_path, effect_adapters)
+    except BaseException:
+        release_controller(lock)
+        raise
+
+
+def _build_host(config: HostConfig, root: Path, lock: Any, env: Mapping[str, str],
+                executors: Mapping[str, Executor] | None, noesis_transport: JSONTransport | None,
+                config_path: Path | None, effect_adapters: Mapping[EffectKind, EffectAdapter] | None) -> Host:
     workspaces = LocalWorkspaces(root / "workspaces")
     registry: dict[str, Executor] = {}
     if "fake" in config.executors:
@@ -515,6 +603,7 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
     host = Host(config, store, kernel, authority, security, app, control, redaction, publisher, worker, providers,
                 transport, noesis_transport is None, config_path, env)
     host.live = live
+    host.lock = lock
     app.recovery.append(planning.recover)
     if config_path is not None:
         app.reloader = host.reload_from_signal

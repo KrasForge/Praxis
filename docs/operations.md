@@ -50,6 +50,16 @@ provider before you go to production.
 [Host](host.md) puts this wiring, the client authentication, TLS and the
 publication trigger behind one configuration file.
 
+## One controller per store
+
+A host takes an exclusive `flock` on `<data_dir>/controller.lock` at startup and
+holds it until it stops. A second host on the same directory refuses to start.
+The operating system releases the lock when the process dies, so a crash never
+blocks a restart. `python -m praxis.host check` reports whether a controller holds
+the directory, and `retention --apply` refuses to run while one does. The lock
+file holds no data: leave it out of backups and restores. See
+[ADR 0004](adr/0004-single-controller-ownership.md).
+
 ## Upgrade and backup
 
 1. Stop new submissions and mutations. Drain the tasks, or terminate them

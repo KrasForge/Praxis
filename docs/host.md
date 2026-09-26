@@ -269,25 +269,31 @@ while the host is stopped. A running host applies the policy through
 another ASGI server. It applies:
 
 - client tokens, roles and delegation;
-- the server certificate and key, and additional trusted client CAs (`serve` only);
+- the server certificate and key, and the trusted client CAs, including removals
+  (`serve` only);
 - the Noesis credential (from `token_file`; environment variables cannot change in a
   running process), CA and client certificate, swapped as one transport;
-- `noesis.context_domains`.
+- `noesis.context_domains`;
+- `[[effect_policy]]` and the `[planning]` allowlist.
 
 Everything is read and validated before anything changes, so an invalid file, an
 unreadable certificate or an empty credential leaves the running configuration in
 place. The result is logged either way. Changes to `data_dir`, `executors`, the bind
-address, the TLS mode, `[limits]` or the Noesis origin and publication mode are
-refused and need a restart.
+address, the TLS mode, `[limits]`, `[retention]`, `[[effects]]` or the Noesis
+origin and publication mode are refused and need a restart.
 
 To rotate a client token without an outage:
 1. List both digests (`token_sha256 = ["<new>", "<old>"]`) and send `SIGHUP`.
 2. Move the client to the new token.
 3. Remove the old digest and send `SIGHUP` again. The old token is rejected from then on.
 
-New TLS handshakes use a reloaded certificate. Connections already open keep the
-certificate they negotiated. OpenSSL cannot remove a trusted CA from a live context,
-so dropping a client CA needs a restart.
+A reload builds a new server TLS context from the current files. OpenSSL cannot
+remove a trusted CA from a live context, so every new handshake switches to the new
+context instead. A client certificate from a CA that was removed is refused from
+the next connection on. Under `serve`, open connections whose client certificate
+was issued by a CA that is no longer trusted are closed; the match is on the
+issuer name, so list intermediate CAs in `tls_client_ca` too. Other open
+connections keep the certificate they negotiated.
 
 ## What Modulo calls
 
@@ -311,6 +317,8 @@ authenticated itself: Praxis trusts the delegating client for that assertion.
 ## Not covered
 
 - Distributed rate limiting: limits are per host process.
-- Removing a trusted client CA without a restart.
-- Multi-controller placement: the host is one kernel owner, as in [operations](operations.md).
+- Multi-controller placement: one controller owns one store
+  ([ADR 0004](adr/0004-single-controller-ownership.md)). The host holds
+  `controller.lock` in `data_dir`, so a second host on the same directory refuses
+  to start.
 - Journal compaction: retention removes files, never process records or events.

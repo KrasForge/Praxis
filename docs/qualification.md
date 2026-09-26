@@ -118,7 +118,9 @@ after it writes the children. These regressions run in the full gate.
   cgroups and quotas of your host give the containment for CPU, memory, PIDs and
   disk. A third-party SDK adapter needs a trusted configuration for an isolated
   worker; the flag alone makes no confinement.
-- The controller is a single owner. The supervision of your host owns the
+- The controller is a single owner
+  ([ADR 0004](adr/0004-single-controller-ownership.md)); the host refuses to start
+  on a data directory that another controller holds. The supervision of your host owns the
   deadlines for startup and shutdown, and the termination of a local orphan. A
   finite wall budget rejects an adapter that cannot cancel. A checkpoint or a
   restore that Praxis does not support stays explicit. The overhead of a native
@@ -143,8 +145,8 @@ after it writes the children. These regressions run in the full gate.
   no distributed consensus and no remote attestation. The core package has no dependency on an ASGI
   server. The optional `praxis.host` gives ownership per client, delegated
   identities, TLS and in-memory admission limits for one controller. It does not
-  give distributed rate limits or placement across controllers, and it needs a
-  restart to remove a trusted client CA. See [host](host.md). The sample HTTP
+  give distributed rate limits or placement across controllers
+  ([ADR 0004](adr/0004-single-controller-ownership.md)). See [host](host.md). The sample HTTP
   server uses one operator and a fake executor.
 
 No automated qualification gate fails in the configuration that Praxis tested.
