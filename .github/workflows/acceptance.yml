@@ -1,0 +1,72 @@
+name: Acceptance
+# Live provider acceptance (docs/acceptance.md). Never runs on pull requests: it spends
+# real credentials and, when enabled, writes to a Noesis scratch route.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+permissions:
+  contents: read
+concurrency: acceptance
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    # Protect this environment with required reviewers; its secrets are the credentials.
+    environment: acceptance
+    timeout-minutes: 30
+    env:
+      # A GitHub-hosted runner is a disposable VM: the operator's confinement assertion.
+      PRAXIS_ACCEPTANCE_ISOLATED_WORKER: '1'
+      CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      PRAXIS_ACCEPTANCE_NOESIS_URL: ${{ vars.PRAXIS_ACCEPTANCE_NOESIS_URL }}
+      PRAXIS_ACCEPTANCE_NOESIS_DOMAIN: ${{ vars.PRAXIS_ACCEPTANCE_NOESIS_DOMAIN }}
+      PRAXIS_ACCEPTANCE_NOESIS_TOKEN: ${{ secrets.PRAXIS_ACCEPTANCE_NOESIS_TOKEN }}
+      PRAXIS_ACCEPTANCE_NOESIS_PUBLISH: ${{ vars.PRAXIS_ACCEPTANCE_NOESIS_PUBLISH }}
+      PRAXIS_ACCEPTANCE_NOESIS_INGEST_PATH: ${{ vars.PRAXIS_ACCEPTANCE_NOESIS_INGEST_PATH }}
+      PRAXIS_ACCEPTANCE_HOST_URL: ${{ vars.PRAXIS_ACCEPTANCE_HOST_URL }}
+      PRAXIS_ACCEPTANCE_HOST_TOKEN: ${{ secrets.PRAXIS_ACCEPTANCE_HOST_TOKEN }}
+      PRAXIS_ACCEPTANCE_CODEX_MODEL: ${{ vars.PRAXIS_ACCEPTANCE_CODEX_MODEL }}
+      PRAXIS_ACCEPTANCE_CLAUDE_MODEL: ${{ vars.PRAXIS_ACCEPTANCE_CLAUDE_MODEL }}
+      PRAXIS_ACCEPTANCE_DEEPSEEK_MODEL: ${{ vars.PRAXIS_ACCEPTANCE_DEEPSEEK_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+          python-version: '3.12'
+      - run: uv sync --locked
+      - name: Install pinned provider clients
+        env:
+          NPM_PACKAGES: ${{ vars.PRAXIS_ACCEPTANCE_NPM }}
+          PIP_PACKAGES: ${{ vars.PRAXIS_ACCEPTANCE_PIP }}
+        run: |
+          if [ -n "$NPM_PACKAGES" ]; then npm install --global $NPM_PACKAGES; fi
+          if [ -n "$PIP_PACKAGES" ]; then uv pip install $PIP_PACKAGES; fi
+      - name: Write TLS material
+        env:
+          NOESIS_CA: ${{ secrets.PRAXIS_ACCEPTANCE_NOESIS_CA_PEM }}
+          NOESIS_CERT: ${{ secrets.PRAXIS_ACCEPTANCE_NOESIS_CLIENT_CERT_PEM }}
+          NOESIS_KEY: ${{ secrets.PRAXIS_ACCEPTANCE_NOESIS_CLIENT_KEY_PEM }}
+          HOST_CA: ${{ secrets.PRAXIS_ACCEPTANCE_HOST_CA_PEM }}
+          HOST_CERT: ${{ secrets.PRAXIS_ACCEPTANCE_HOST_CLIENT_CERT_PEM }}
+          HOST_KEY: ${{ secrets.PRAXIS_ACCEPTANCE_HOST_CLIENT_KEY_PEM }}
+        run: |
+          umask 077
+          write() { if [ -n "$2" ]; then printf '%s\n' "$2" > "$RUNNER_TEMP/$3"; echo "$1=$RUNNER_TEMP/$3" >> "$GITHUB_ENV"; fi; }
+          write PRAXIS_ACCEPTANCE_NOESIS_CA "$NOESIS_CA" noesis-ca.pem
+          write PRAXIS_ACCEPTANCE_NOESIS_CLIENT_CERT "$NOESIS_CERT" noesis-client.pem
+          write PRAXIS_ACCEPTANCE_NOESIS_CLIENT_KEY "$NOESIS_KEY" noesis-client.key
+          write PRAXIS_ACCEPTANCE_HOST_CA "$HOST_CA" host-ca.pem
+          write PRAXIS_ACCEPTANCE_HOST_CLIENT_CERT "$HOST_CERT" host-client.pem
+          write PRAXIS_ACCEPTANCE_HOST_CLIENT_KEY "$HOST_KEY" host-client.key
+      - name: Run live acceptance
+        run: |
+          PRAXIS_ACCEPTANCE_RECORD="acceptance-$(date -u +%Y-%m-%d).json" uv run --no-sync pytest acceptance -rs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-record
+          path: acceptance-*.json
+          if-no-files-found: error

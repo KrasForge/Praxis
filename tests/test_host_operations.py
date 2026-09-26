@@ -340,3 +340,67 @@ def test_server_certificate_reloads_into_live_context(tmp_path):
     finally:
         listener.close()
         host.close()
+
+
+@pytest.mark.parametrize("retention,field", [
+    ({"workspace_days": -1}, "retention.workspace_days"),
+    ({"canonical_revisions": 1.5}, "retention.canonical_revisions"),
+    ({"canonical_roots": ["/srv/canonical"]}, "retention.canonical_roots"),
+    ({"interval_hours": 1}, "retention.interval_hours"),
+    ({"workspace_days": 1, "interval_hours": 0}, "retention.interval_hours"),
+    ({"keep": 1}, "retention"),
+])
+def test_retention_validation(tmp_path, retention, field):
+    with pytest.raises(HostConfigError) as error:
+        parse_host_config({**data(tmp_path), "retention": retention})
+    assert error.value.field == field
+
+
+def test_scheduled_retention_sweeps_in_the_background(tmp_path):
+    async def exercise():
+        config = parse_host_config({**data(tmp_path), "retention": {"workspace_days": 0, "interval_hours": 1}})
+        host = build_host(config, noesis_transport=Noesis())
+        assert host.app.retention_interval == 3600
+        host.app.retention_interval = 0.01
+        submitted = (await call(host.app, "POST", "/v1/processes", OPS, {"objective": "t", "executor": "fake"}))[1]
+        await host.kernel.tasks[submitted["process_id"]]
+        queue = asyncio.Queue()
+        await queue.put({"type": "lifespan.startup"})
+        sent = []
+        async def send(message):
+            sent.append(message)
+        lifespan = asyncio.create_task(host.app({"type": "lifespan"}, queue.get, send))
+        audit = tmp_path / "data" / "workspaces" / "retention"
+        for _ in range(200):
+            if audit.is_dir() and any(audit.iterdir()):
+                break
+            await asyncio.sleep(0.01)
+        assert audit.is_dir() and any(audit.iterdir())
+        await queue.put({"type": "lifespan.shutdown"})
+        await lifespan
+        assert host.app.retention_task is None and sent[-1]["type"] == "lifespan.shutdown.complete"
+        host.close()
+    asyncio.run(exercise())
+
+
+def test_retention_command_reports_without_a_running_host(tmp_path, capsys):
+    import json
+
+    from praxis.host.__main__ import main
+    config = tmp_path / "host.toml"
+    config.write_text(f'''data_dir = "{tmp_path / 'data'}"
+[[clients]]
+id = "ops"
+token_sha256 = "{token_digest(OPS)}"
+roles = ["admin"]
+[retention]
+workspace_days = 0
+''')
+    assert main(["retention", "--config", str(config)]) == 2  # no database yet
+    host = build_host(parse_host_config({"data_dir": str(tmp_path / "data"), "clients": data(tmp_path)["clients"]}))
+    host.close()
+    capsys.readouterr()
+    assert main(["retention", "--config", str(config)]) == 0
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+    assert main(["retention", "--config", str(config), "--apply"]) == 0
+    assert json.loads(capsys.readouterr().out)["dry_run"] is False

@@ -38,6 +38,7 @@ from praxis.observability.redaction import RedactionPolicy
 from praxis.storage.sqlite import SQLiteStore
 from praxis.transport.http import HTTPTransport, JSONTransport
 from praxis.workspaces.local import LocalWorkspaces
+from praxis.workspaces.retention import RetentionPolicy, RetentionReport, sweep
 
 logger = logging.getLogger("praxis.host")
 PUBLISH_METADATA = "praxis_host"
@@ -105,6 +106,9 @@ class HostApplication:
         self.limiter = limiter
         self.worker_task: asyncio.Task[None] | None = None
         self.reloader: Callable[[], None] | None = None
+        self.retention: Callable[[], object] | None = None  # one applied sweep
+        self.retention_interval: float | None = None
+        self.retention_task: asyncio.Task[None] | None = None
         self.background: set[asyncio.Task[None]] = set()
         self._sighup = False
 
@@ -202,6 +206,9 @@ class HostApplication:
             if message["type"] == "lifespan.startup":
                 if self.worker is not None:
                     self.worker_task = asyncio.create_task(self.worker.run())
+                if self.retention is not None and self.retention_interval is not None:
+                    self.retention_task = asyncio.create_task(self.sweep_periodically(
+                        self.retention, self.retention_interval))
                 if self.reloader is not None:
                     try:
                         asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, self.reloader)
@@ -214,7 +221,21 @@ class HostApplication:
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 
+    @staticmethod
+    async def sweep_periodically(run: Callable[[], object], interval: float) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                run()
+            except Exception:
+                # A failed sweep removes nothing further; the next interval tries again.
+                logger.exception("retention sweep failed")
+
     async def shutdown(self) -> None:
+        if self.retention_task is not None:
+            self.retention_task.cancel()
+            await asyncio.gather(self.retention_task, return_exceptions=True)
+            self.retention_task = None
         if self._sighup:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGHUP)
             self._sighup = False
@@ -253,6 +274,7 @@ def restart_key(config: HostConfig) -> tuple[Any, ...]:
     noesis = config.noesis
     return (config.data_dir, config.executors, config.server.host, config.server.port, config.server.tls,
             config.server.tls_client_ca is not None, config.server.tls_terminated_upstream, config.limits,
+            config.retention,
             None if noesis is None else (noesis.base_url, noesis.ingest_path, noesis.publication))
 
 
@@ -277,6 +299,12 @@ class Host:
 
     def close(self) -> None:
         self.store.close()
+
+    def sweep(self, *, apply: bool) -> RetentionReport:
+        """Run retention against this host's data with its live journal."""
+        return retention_sweep(self.config, self.store, self.kernel.workspaces, apply=apply,
+                               journal=self.kernel.events)
+
 
     def reload(self, config: HostConfig | None = None) -> list[str]:
         """Apply client tokens, TLS material, Noesis credentials and context domains.
@@ -352,6 +380,20 @@ def noesis_http_transport(config: NoesisConfig, token: str) -> HTTPTransport:
                          timeout=config.timeout_seconds, ssl_context=noesis_ssl_context(config))
 
 
+def retention_sweep(config: HostConfig, store: SQLiteStore, workspaces: LocalWorkspaces, *, apply: bool,
+                    journal: list[Any] | None = None) -> RetentionReport:
+    """Apply the [retention] policy once with only the store and workspaces, never a
+    recovered kernel. Beside a live host, report only; apply while it is stopped."""
+    retention = config.retention
+    report = sweep(store, workspaces, RetentionPolicy(retention.workspace_days, retention.canonical_revisions),
+                   canonical=[Path(root) for root in retention.canonical_roots], dry_run=not apply,
+                   journal=journal)
+    if apply:
+        logger.info("retention removed %d item(s), %d bytes; kept %d", len(report.removed),
+                    report.removed_bytes, len(report.kept))
+    return report
+
+
 def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
                executors: Mapping[str, Executor] | None = None,
                noesis_transport: JSONTransport | None = None,
@@ -405,6 +447,9 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
                 transport, noesis_transport is None, config_path, env)
     if config_path is not None:
         app.reloader = host.reload_from_signal
+    if config.retention.enabled and config.retention.interval_hours is not None:
+        app.retention = lambda: host.sweep(apply=True)
+        app.retention_interval = config.retention.interval_hours * 3600
     return host
 
 

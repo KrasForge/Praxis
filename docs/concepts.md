@@ -237,9 +237,10 @@ recovery stays manual, on purpose:
 
 - A heartbeat that timed out is **not** confirmation that the work stopped.
   Before you move the work, confirm positively that the old worker stopped.
-- Praxis does not rebuild the staged candidate transactions that were in memory.
-  The bytes that remain are material for diagnosis. They are not permission to
-  publish.
+- Praxis rebuilds a staged candidate transaction only when it can still commit
+  exactly the snapshot that verification approved. Otherwise it records the
+  transaction as abandoned, and the candidate can never commit. See
+  [operations](operations.md#staged-candidate-transactions).
 - After a canonical commit, Praxis blocks a replay.
 
 Events use JSON envelopes of version one. `Kernel.metrics.snapshot()` projects

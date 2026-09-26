@@ -98,9 +98,33 @@ blindly. Inspect the `workspace.committed` receipts and the history of the
 canonical pointer. After a canonical commit, Praxis blocks a replay. Attach the
 canonical targets and the scheduler policy of the host deliberately.
 
-Praxis does not rebuild the staged candidate transactions that were in memory.
-The bytes that remain are material for diagnosis and recovery. They are not
-permission to publish.
+### Staged candidate transactions
+
+A verified candidate that waits for selection has a staged transaction. Praxis
+records it in a `transaction.staged` event. `recover_records()` rebuilds the
+transaction only when all of these conditions are true:
+
+- The process completed, and verification approved the staged snapshot.
+- The canonical directory still exists, and its current revision is still the
+  baseline revision. Recovery does not make a missing canonical directory.
+- The retained workspace still gives the verified snapshot.
+- The baseline manifest and its blobs are still present, for a rollback.
+
+Praxis then records `transaction.recovered`, and `commit_selected` can publish
+the candidate. The commit checks the snapshot and the baseline again, under the
+canonical lock.
+
+If a condition is false, Praxis records `transaction.abandoned` with one of
+these reasons: `process_not_completed`, `verification_unavailable`,
+`canonical_missing`, `stale_baseline`, `snapshot_missing`,
+`snapshot_mismatch` or `baseline_missing`. `commit_selected` then refuses the
+candidate with `staged_transaction_abandoned`, after this restart and after all
+later restarts. To publish the work, run the candidate again against the current
+canonical revision. The retained bytes are material for diagnosis only.
+
+A journal from a release before 1.2.0 has no `transaction.staged` events.
+Praxis cannot rebuild the transactions of those candidates. Do not select a
+candidate that was staged before the upgrade: run it again.
 
 A crash of the controller can leave a Noesis publication `in_progress`. An
 operator must then reconcile it with the deterministic document ID. Do this
@@ -117,5 +141,39 @@ is unknown; it is not proof of zero cost. Keep the quotas for cgroups, processes
 and disk outside the kernel. Where a hard wall limit matters, use request
 deadlines and an executor that can cancel.
 
-Workspace retention, logs and backups need retention policies from the host.
-Version 1 has no daemon for quotas or for garbage collection.
+### Retention
+
+Workspaces, snapshot blobs and canonical revisions grow until you remove them.
+The retention sweep removes only the state that no recovery path can still use:
+
+| Item | Praxis removes it when | Praxis keeps it when |
+| --- | --- | --- |
+| Workspace | Its process has been terminal for `workspace_days` | The process is not terminal or is not in the store; the workspace holds a pending staged transaction; the process has an uncertain effect |
+| Snapshot manifest | Nothing references it, and it is older than `workspace_days` | A pending staged transaction or a checkpoint references it |
+| Blob | No kept manifest references it, and it is older than `workspace_days` | A kept manifest references it |
+| Canonical revision | It is older than the newest `canonical_revisions` superseded revisions | It is current, or it is the baseline of a pending staged transaction |
+
+If a process that is not terminal is older than `workspace_days`, the sweep
+keeps every manifest and blob. That process can still roll back to its
+baseline. The sweep takes the canonical lock before it removes a revision, and
+it takes the snapshot lock before it removes a blob.
+
+Run it on demand. Without `--apply` it only reports:
+
+```sh
+praxis retention --db data/runtime.db --workspaces data/workspaces \
+    --workspace-days 14 --canonical /srv/canonical --canonical-revisions 5
+praxis retention ... --apply
+```
+
+`--apply` removes the items and journals a `retention.removed` event on the
+process that owned each workspace or revision. It also writes the full report to
+`<workspaces>/retention/<milliseconds>.json`. The sweep reads the store, but it
+does not recover a kernel, so a dry run is safe beside a live controller. Apply
+a standalone sweep only while the controller is stopped. On a live host, let the
+[host](host.md#retention) run the sweep on a schedule, inside the controller.
+
+The sweep does not compact the journal. The process records and events are the
+audit trail. They are also the idempotency record for submissions, effects and
+publication. See [ADR 0006](adr/0006-retention-excludes-the-journal.md). Logs and
+backups still need retention policies from the host.

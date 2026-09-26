@@ -2,10 +2,11 @@
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, build_opener
+from urllib.request import BaseHandler, HTTPSHandler, Request, build_opener
 
 from praxis.client import ClientAPIError, Response
 from praxis.kernel.parsing import load_object
@@ -14,10 +15,13 @@ from praxis.transport.http import HTTPTransport, NoRedirect, TransportError
 
 class ClientHTTPTransport:
     def __init__(self, base_url: str, *, headers: dict[str, str] | None = None,
-                 timeout: float = 15, max_bytes: int = 1048576):
-        config = HTTPTransport(base_url, headers=headers, timeout=timeout, max_bytes=max_bytes)
+                 timeout: float = 15, max_bytes: int = 1048576, ssl_context: ssl.SSLContext | None = None):
+        """``ssl_context`` trusts a private CA and presents a client certificate (mutual TLS)."""
+        config = HTTPTransport(base_url, headers=headers, timeout=timeout, max_bytes=max_bytes,
+                               ssl_context=ssl_context)
         self.base_url, self.headers = config.base_url, config.headers
         self.timeout, self.max_bytes = config.timeout, config.max_bytes
+        self.ssl_context = config.ssl_context
 
     async def request(self, method: str, path: str, body: dict[str, Any] | None = None,
                       headers: dict[str, str] | None = None) -> Response:
@@ -31,10 +35,13 @@ class ClientHTTPTransport:
             data=None if body is None else json.dumps(body, allow_nan=False).encode(),
             headers={**self.headers, "Content-Type": "application/json", **(headers or {})})
         try:
-            return build_opener(NoRedirect()).open(request, timeout=self.timeout)
+            handlers: list[BaseHandler] = [NoRedirect()]
+            if self.ssl_context is not None:
+                handlers.append(HTTPSHandler(context=self.ssl_context))
+            return build_opener(*handlers).open(request, timeout=self.timeout)
         except HTTPError as exc:
             return exc
-        except (URLError, TimeoutError, OSError):
+        except (URLError, TimeoutError, OSError, ssl.SSLError):
             raise TransportError("transport_unavailable") from None
 
     def _client_request(self, method: str, path: str, body: dict[str, Any] | None,
