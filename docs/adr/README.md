@@ -6,3 +6,12 @@ operational ownership rule. Each ADR records status, context, decision,
 consequences, compatibility, verification, and superseded decisions. Accepted
 records are historical evidence: supersede them instead of silently rewriting
 the decision.
+
+## Index
+
+| ADR | Title | Status |
+| --- | --- | --- |
+| [0001](0001-effect-adapters.md) | Effect adapters and the host effect pipeline | Proposed |
+| [0002](0002-effect-approval-policy.md) | Effect approval policy and approver authority | Proposed |
+| [0003](0003-planning-as-a-verified-workload.md) | Planning runs as a verified workload | Proposed |
+| [0004](0004-single-controller-ownership.md) | A single controller owns each store | Proposed |
