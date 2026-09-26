@@ -65,6 +65,10 @@ base_url = "https://hooks.internal:8443"
 token_env = "PRAXIS_WEBHOOK_TOKEN"
 ca_file = "/etc/praxis/tls/internal-ca.pem"
 
+# The most a verified plan may request for its nodes; never "*". See docs/host.md#plans.
+[planning]
+grant_allowlist = [{resource = "filesystem", actions = ["read"], scope = "/srv/data"}]
+
 # Remove expired workspaces and snapshots; see docs/operations.md#retention.
 [retention]
 workspace_days = 14

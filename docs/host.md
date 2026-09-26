@@ -49,6 +49,7 @@ is closed: unknown keys and unsafe combinations are rejected at load time.
 | `[limits]` | Optional admission limits; see [Limits and deadlines](#limits-and-deadlines) |
 | `[[effects]]` | Effect adapters, one per kind; see [Effects and approvals](#effects-and-approvals) |
 | `[[effect_policy]]` | Approval rules for proposed effects; deny by default |
+| `planning.grant_allowlist` | The most a plan may request for a node: `resource`, `actions`, `scope`. Never `*` |
 
 A non-loopback bind without local TLS is refused unless
 `tls_terminated_upstream = true` says a proxy owns TLS. Secrets are never
@@ -69,7 +70,7 @@ identity. Other clients sending the header are rejected.
 | `submit` | `POST /v1/processes` |
 | `read` | inspect, `tree`, `events` |
 | `control` | `control`, `interventions` |
-| `approve` | `approvals` (list and decide) |
+| `approve` | `approvals` (list and decide), and `plan/materialize` |
 | `publish` | `POST /v1/processes/{id}/publication`, effect `apply` and `reconcile`, and auto-publication opt-in |
 | `health` | `GET /v1/health` |
 | `admin` | every role, on every process |
@@ -136,6 +137,26 @@ idempotency keys make this safe. An effect left in `applying` is reported as
 `effect_uncertain` in `GET /v1/health` and on its process, and it is never
 applied again. Reconcile it with
 `POST /v1/processes/{id}/effects/{effect_id}/reconcile`.
+
+## Plans
+
+The host registers the `plan` validator (see
+[concepts](concepts.md#to-plan-a-plan-is-verified-output)). A grant that a plan
+requests is admitted when an allowlist entry has the same resource, a superset of
+its actions, and a scope that contains it:
+
+```toml
+[planning]
+grant_allowlist = [
+  {resource = "filesystem", actions = ["read"], scope = "/srv/data"},
+  {resource = "network", actions = ["connect"], scope = "*.internal.example"},
+]
+```
+
+Requestable resources are `filesystem` (read, write), `network` (connect),
+`secret` (read) and `effect` (stage, apply). Materialization checks the
+allowlist again, so a grant removed by a reload is refused and recorded in the
+`plan.materialized` event. The allowlist reloads on `SIGHUP`.
 
 ## Transport security
 

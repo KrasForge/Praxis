@@ -211,6 +211,35 @@ queues them. `Supervisor` and the services for speculative candidates
 coordinate the fork, the join, the evaluation, the selection and the
 publication of the winner only.
 
+## To plan: a plan is verified output
+
+Praxis does not plan. A planning process, often an agent, writes `plan.json`
+in the closed `praxis.plan` v1 schema: nodes that are `ProcessSpec`s keyed by
+name, the dependencies between them, and the grants each node **requests**. A
+node never carries `capabilities`.
+
+```json
+{"schema": "praxis.plan", "schema_version": 1,
+ "nodes": [{"key": "build", "spec": {"objective": "build", "executor": "local",
+                                     "contract": {"required_outputs": ["dist"]}}},
+           {"key": "test", "spec": {"objective": "test", "executor": "local",
+                                    "contract": {"required_outputs": ["report"]}}}],
+ "dependencies": [{"prerequisite": "build", "dependent": "test"}],
+ "requested_grants": [{"node": "test", "resource": "filesystem",
+                       "actions": ["read"], "scope": "/srv/data"}]}
+```
+
+The planning process lists `plan.json` as a required output and the `plan`
+validator as a required check. The validator fails a plan with a cycle, an
+unregistered executor, node budgets beyond the planning budget, a node with an
+empty contract, or a grant outside the host allowlist. A verified plan does
+nothing until a person materializes it (`POST .../plan/materialize`, role
+`approve`). A terminal process cannot have children, so each node becomes a
+root process owned by the plan's submitter, linked by a stored graph that the
+planning process owns. The host starts runnable nodes and advances the graph as
+nodes finish, also after a restart. See
+[ADR 0003](adr/0003-planning-as-a-verified-workload.md).
+
 ## Authority
 
 A capability has a type. The kernel issues it. A delegation can only make it

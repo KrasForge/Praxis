@@ -17,6 +17,7 @@ purpose.
 | POST /v1/processes/{id}/control | Give an operation and the current attempt_id: cancel, suspend, resume, signal or retry |
 | GET/POST /v1/processes/{id}/approvals | Read the pending effects, or give a decision that is bound to an attempt and a version |
 | POST /v1/processes/{id}/interventions | Give an audited instruction or signal intervention that has a type |
+| POST /v1/processes/{id}/plan/materialize | Turn the verified plan of a completed planning process into processes and a graph, once |
 | POST /v1/processes/{id}/effects/{effect_id}/apply | Apply an approved effect. The body has `attempt_id` and `version` |
 | POST /v1/processes/{id}/effects/{effect_id}/reconcile | Resolve an uncertain effect through its adapter lookup. The body has `attempt_id` |
 | GET /v1/health | Read a snapshot of the queue, executors, workers, blocks and budget pressure |

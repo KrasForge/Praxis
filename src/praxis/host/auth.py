@@ -21,7 +21,7 @@ PRINCIPAL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
 ACTION_ROLES = {
     "health": "health", "submit": "submit", "inspect": "read", "tree": "read", "events": "read",
     "control": "control", "interventions": "control", "approvals": "approve", "publication": "publish",
-    "effects": "publish",
+    "effects": "publish", "plan": "approve",
 }
 
 

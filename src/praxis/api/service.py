@@ -202,6 +202,11 @@ class ControlPlane:
         except (ValueError, TypeError, KeyError, PermissionError):
             raise APIError(409, "approval_rejected") from None
 
+    async def materialize_plan(self, process_id: str, actor: str) -> dict[str, Any]:
+        """Deployments that run plans override this (ADR 0003)."""
+        self.inspect(process_id)
+        raise APIError(404, "route_not_found")
+
     def approval_expiry(self, effect: Effect) -> str | None:
         """Deployments set an expiry for approvals; the default is none."""
         return None

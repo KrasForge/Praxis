@@ -140,6 +140,19 @@ class EffectPolicyRule:
 
 
 @dataclass(frozen=True)
+class GrantAllowance:
+    """One ``[planning]`` allowlist entry: the most a plan may request for a node."""
+    resource: str
+    actions: frozenset[str]
+    scope: str
+
+
+@dataclass(frozen=True)
+class PlanningConfig:
+    grant_allowlist: tuple[GrantAllowance, ...] = ()
+
+
+@dataclass(frozen=True)
 class HostConfig:
     data_dir: str
     clients: tuple[ClientConfig, ...]
@@ -150,6 +163,7 @@ class HostConfig:
     retention: RetentionConfig = RetentionConfig()
     effects: tuple[EffectAdapterConfig, ...] = ()
     effect_policy: tuple[EffectPolicyRule, ...] = ()
+    planning: PlanningConfig = PlanningConfig()
 
     def effect_rule(self, kind: str, target: str) -> EffectPolicyRule | None:
         """The most specific matching rule; None means deny."""
@@ -174,7 +188,7 @@ def load_host_config(path: Path) -> HostConfig:
 
 def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
     _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits", "retention",
-                           "effects", "effect_policy"})
+                           "effects", "effect_policy", "planning"})
     data_dir = _path("data_dir", data.get("data_dir"))
     if data_dir is None:
         raise HostConfigError("data_dir", "required")
@@ -187,7 +201,7 @@ def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
     noesis = None if "noesis" not in data else _noesis(data["noesis"])
     return HostConfig(data_dir, clients, frozenset(executors), server, noesis, _limits(data.get("limits", {})),
                       _retention(data.get("retention", {})), _effects(data.get("effects", [])),
-                      _effect_policy(data.get("effect_policy", [])))
+                      _effect_policy(data.get("effect_policy", [])), _planning(data.get("planning", {})))
 
 
 def is_loopback(host: str) -> bool:
@@ -441,6 +455,36 @@ def _effect_policy(data: Any) -> tuple[EffectPolicyRule, ...]:
     if len({(rule.kind, rule.target) for rule in rules}) != len(rules):
         raise HostConfigError("effect_policy", "duplicate kind and target")
     return tuple(rules)
+
+
+GRANTABLE = {"filesystem": {"read", "write"}, "network": {"connect"}, "secret": {"read"},
+             "effect": {"stage", "apply"}}
+
+
+def _planning(data: Any) -> PlanningConfig:
+    _closed("planning", data, {"grant_allowlist"})
+    entries = data.get("grant_allowlist", [])
+    if not isinstance(entries, list):
+        raise HostConfigError("planning.grant_allowlist", "expected array of tables")
+    allowances = []
+    for index, item in enumerate(entries):
+        field = f"planning.grant_allowlist[{index}]"
+        _closed(field, item, {"resource", "actions", "scope"})
+        resource, actions, scope = item.get("resource"), item.get("actions"), item.get("scope")
+        if resource not in GRANTABLE:
+            raise HostConfigError(field + ".resource", "expected one of " + ", ".join(sorted(GRANTABLE)))
+        if (not isinstance(actions, list) or not actions or len(set(actions)) != len(actions)
+                or not set(actions) <= GRANTABLE[resource]):
+            raise HostConfigError(field + ".actions", "expected unique actions from "
+                                  + ", ".join(sorted(GRANTABLE[resource])))
+        # A wildcard would hand every plan the host's whole authority for that resource.
+        if not isinstance(scope, str) or not scope.strip() or "*" in scope.replace("*.", "", 1) \
+                or scope == "*" or "\x00" in scope:
+            raise HostConfigError(field + ".scope", "expected a concrete scope, never *")
+        if resource == "filesystem" and (not scope.startswith("/") or scope == "/"):
+            raise HostConfigError(field + ".scope", "expected an absolute path below /")
+        allowances.append(GrantAllowance(resource, frozenset(actions), scope))
+    return PlanningConfig(tuple(allowances))
 
 
 def _closed(field: str, data: Any, allowed: set[str]) -> None:

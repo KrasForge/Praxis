@@ -138,6 +138,17 @@ class Client:
         except (ValueError, KeyError, TypeError):
             raise TransportError("invalid_api_response") from None
 
+    async def materialize_plan(self, process_id: str) -> dict[str, Any]:
+        """Turn a verified plan into processes and a graph; repeated calls return the first result."""
+        data = await self._request("POST", process_path(process_id) + "/plan/materialize", {})
+        try:
+            if (data["process_id"] != process_id or not isinstance(data["nodes"], dict)
+                    or not isinstance(data["graph_id"], str) or type(data["duplicate"]) is not bool):
+                raise ValueError()
+            return data
+        except (ValueError, KeyError, TypeError):
+            raise TransportError("invalid_api_response") from None
+
     async def events(self, process_id: str, *, after: int = 0, tree: bool = False) -> AsyncIterator[StoredEvent]:
         if type(after) is not int or after < 0:
             raise ValueError("invalid_event_cursor")
