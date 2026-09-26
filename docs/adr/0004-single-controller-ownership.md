@@ -16,7 +16,8 @@ is spread across several documents:
 - `docs/qualification.md`: the controller is a single owner, and graph
   readiness and distributed scheduling need orchestration from the host.
 
-Several parts of the code assume one owner. `Authority` keeps grants in memory.
+Several parts of the code assume one owner. `Authority` holds grants in memory,
+and it rebuilds them from the journal only at recovery.
 Rate limits live in the memory of the host. The kernel tracks running tasks in
 a local map.
 
@@ -36,7 +37,7 @@ a local map.
    ADR must cover at least:
    - an ownership lease with a fencing token, checked at every canonical
      commit and every effect application;
-   - grants that are persisted, instead of kept in memory;
+   - grants read from the shared store at each decision, not only at recovery;
    - rate limits shared between controllers;
    - graph readiness that more than one controller can resolve safely.
 
