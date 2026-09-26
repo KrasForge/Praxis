@@ -123,7 +123,12 @@ class HostEffects:
             if staged.status != EffectStatus.PROPOSED or staged.version != 0:
                 continue  # rejected at staging, or already handled before a restart
             if rule is None or rule.policy == "deny":
-                continue  # unreachable: without authority staging rejects it
+                # Staging passed on authority the process held for another reason; the
+                # policy still denies, so record that decision instead of leaving it open.
+                self._require(staged, Resource.EFFECT, "approve", staged.target)
+                service.resolve_approval(staged.effect_id, staged.version, False, actor=staged.process_id,
+                                         reason="policy:deny" if rule is not None else "policy:no_rule")
+                continue
             if rule.policy == "auto":
                 service.resolve_approval(staged.effect_id, staged.version, True,
                                          actor=staged.process_id, reason=f"policy:{rule.kind}:{rule.target}",
@@ -134,12 +139,15 @@ class HostEffects:
 
     def _grant(self, effect: Effect) -> None:
         """Exactly the authority this effect needs, and only if the process lacks it."""
-        authority = self.kernel.authority
         needed = [(Resource.EFFECT, "stage", effect.target),
                   (effect.authority.resource, effect.authority.action, effect.authority.scope)]
         rule = self.rule(effect)
         if rule is not None and rule.policy == "auto":
             needed.append((Resource.EFFECT, "approve", effect.target))
         for resource, action, scope in needed:
-            if not authority.authorize(effect.process_id, resource, action, scope).allowed:
-                authority.issue(effect.process_id, resource, frozenset({action}), scope)
+            self._require(effect, resource, action, scope)
+
+    def _require(self, effect: Effect, resource: Resource, action: str, scope: str) -> None:
+        authority = self.kernel.authority
+        if not authority.authorize(effect.process_id, resource, action, scope).allowed:
+            authority.issue(effect.process_id, resource, frozenset({action}), scope)

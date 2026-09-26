@@ -343,3 +343,36 @@ def test_client_applies_and_reconciles_effects(tmp_path):
         assert reconciled.applied and len(sender.sent) == 1
         host.close()
     asyncio.run(exercise())
+
+
+def test_deny_rejects_even_when_the_process_already_holds_the_authority(tmp_path):
+    rules = [{"kind": "message_send", "target": "ops", "policy": "deny"}]
+    host = build_host(host_config(tmp_path, rules), effect_adapters={EffectKind.MESSAGE_SEND: Sender()})
+    process = host.kernel.create(ProcessSpec("work", "local"), submission_actor="modulo/alice")
+    # Authority granted for another reason: staging alone would now succeed.
+    for action, scope in (("stage", "ops"), ("apply", "message:ops")):
+        host.kernel.authority.issue(process.process_id, Resource.EFFECT, frozenset({action}), scope)
+    effect = message_send(process.process_id, process.attempt_id, "ops", "hi")
+    host.control.policy.propose(process.process_id, (effect,))
+    stored = host.control.effects.find(effect.idempotency_key)
+    assert stored.status == EffectStatus.REJECTED
+    assert host.control.effects.approvals(stored.effect_id)[-1].reason == "policy:deny"
+    host.close()
+
+
+def test_approvers_see_only_the_effects_they_may_decide(tmp_path):
+    async def exercise():
+        rules = [{"kind": "message_send", "target": "ops", "policy": "human", "approvers": ["review/bob"]},
+                 {"kind": "message_send", "target": "legal", "policy": "human", "approvers": ["review/erin"]}]
+        host = build_host(host_config(tmp_path, rules), effect_adapters={EffectKind.MESSAGE_SEND: Sender()})
+        process_id = await submit(host, {"1.json": PROPOSALS["1.json"],
+                                         "2.json": proposal("message_send", "legal", {"text": "contract"})})
+        path = f"/v1/processes/{process_id}/approvals"
+        _, owner = await call(host.app, "GET", path, MODULO, user="alice")
+        assert sorted(e["target"] for e in owner["approvals"]) == ["legal", "ops"]
+        _, bob = await call(host.app, "GET", path, REVIEW, user="bob")
+        assert [e["target"] for e in bob["approvals"]] == ["ops"]
+        _, erin = await call(host.app, "GET", path, REVIEW, user="erin")
+        assert [e["target"] for e in erin["approvals"]] == ["legal"]
+        host.close()
+    asyncio.run(exercise())

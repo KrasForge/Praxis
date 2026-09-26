@@ -110,7 +110,7 @@ class Application:
         if len(parts) == 4 and parts[:2] == ["v1", "processes"]:
             if parts[3] == "approvals":
                 if method == "GET":
-                    return 200, self.service.pending_approvals(parts[2])
+                    return 200, self.service.pending_approvals(parts[2], actor.identity)
                 if method == "POST":
                     return 200, self.service.resolve_approval(parts[2], data)
             if parts[3] == "interventions" and method == "POST":

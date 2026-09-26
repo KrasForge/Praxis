@@ -82,6 +82,18 @@ class HostControlPlane(ControlPlane):
     def approval_expiry(self, effect: Effect) -> str | None:
         return None if self.policy is None else self.policy.expires_at(effect)
 
+    def may_see(self, actor: str | None, effect: Effect) -> bool:
+        """The owner's side sees every pending effect; an approver only those they decide."""
+        owner = None if self.owner is None else self.owner(effect.process_id)
+        if actor is None or owner is None:
+            return True
+        client = self.config.client(actor.split("/", 1)[0])
+        if client is not None and "admin" in client.roles:
+            return True
+        if actor == owner or ("/" not in actor and owner.startswith(actor + "/")):
+            return True  # the submitter, or their client acting as itself
+        return self.policy is not None and self.policy.may_decide(actor, effect)
+
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *,
                actor: str = "kernel") -> dict[str, Any]:
         response = super().submit(data, idempotency_key, actor=actor)

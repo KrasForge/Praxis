@@ -171,12 +171,16 @@ class ControlPlane:
                 "operation": operation, "attempt_id": process.attempt_id, "response": response}, parent_id=process.parent_id))
             return {"process_id": process_id, "attempt_id": process.attempt_id, "control": response}
 
-    def pending_approvals(self, process_id: str) -> dict[str, Any]:
+    def pending_approvals(self, process_id: str, actor: str | None = None) -> dict[str, Any]:
         family = {p["process_id"] for p in self.inspect_tree(process_id)["processes"]}
         if self.effects is None:
             raise APIError(503, "effect_service_unavailable")
         return {"approvals": [json.loads(effect.to_json()) for effect in self.effects.pending()
-                              if effect.process_id in family]}
+                              if effect.process_id in family and self.may_see(actor, effect)]}
+
+    def may_see(self, actor: str | None, effect: Effect) -> bool:
+        """Deployments narrow what a caller who does not own the process sees."""
+        return True
 
     def resolve_approval(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
         self.inspect(process_id)
