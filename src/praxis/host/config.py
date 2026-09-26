@@ -72,6 +72,18 @@ class LimitsConfig:
 
 
 @dataclass(frozen=True)
+class RetentionConfig:
+    workspace_days: int | None = None
+    canonical_revisions: int | None = None
+    canonical_roots: tuple[str, ...] = ()
+    interval_hours: float | None = None  # None: sweep only on demand
+
+    @property
+    def enabled(self) -> bool:
+        return self.workspace_days is not None or self.canonical_revisions is not None
+
+
+@dataclass(frozen=True)
 class HostConfig:
     data_dir: str
     clients: tuple[ClientConfig, ...]
@@ -79,6 +91,7 @@ class HostConfig:
     server: ServerConfig = ServerConfig()
     noesis: NoesisConfig | None = None
     limits: LimitsConfig = LimitsConfig()
+    retention: RetentionConfig = RetentionConfig()
 
     def client(self, identity: str) -> ClientConfig | None:
         return next((client for client in self.clients if client.id == identity), None)
@@ -94,7 +107,7 @@ def load_host_config(path: Path) -> HostConfig:
 
 
 def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
-    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits"})
+    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits", "retention"})
     data_dir = _path("data_dir", data.get("data_dir"))
     if data_dir is None:
         raise HostConfigError("data_dir", "required")
@@ -105,7 +118,8 @@ def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
     server = _server(data.get("server", {}))
     clients = _clients(data.get("clients"))
     noesis = None if "noesis" not in data else _noesis(data["noesis"])
-    return HostConfig(data_dir, clients, frozenset(executors), server, noesis, _limits(data.get("limits", {})))
+    return HostConfig(data_dir, clients, frozenset(executors), server, noesis, _limits(data.get("limits", {})),
+                      _retention(data.get("retention", {})))
 
 
 def is_loopback(host: str) -> bool:
@@ -229,6 +243,31 @@ def _limits(data: Any) -> LimitsConfig:
         raise HostConfigError("limits.exempt_admin", "expected boolean")
     return LimitsConfig(**counts, request_timeout_seconds=None if timeout is None else float(timeout),
                         exempt_admin=exempt)
+
+
+def _retention(data: Any) -> RetentionConfig:
+    _closed("retention", data, {"workspace_days", "canonical_revisions", "canonical_roots", "interval_hours"})
+    counts = {}
+    for key in ("workspace_days", "canonical_revisions"):
+        value = data.get(key)
+        if value is not None and (type(value) is not int or not 0 <= value <= 36_500):
+            raise HostConfigError("retention." + key, "expected integer from 0 to 36500")
+        counts[key] = value
+    roots = data.get("canonical_roots", [])
+    if not isinstance(roots, list) or len(set(roots)) != len(roots):
+        raise HostConfigError("retention.canonical_roots", "expected unique paths")
+    for root in roots:
+        _path("retention.canonical_roots", root)
+    if roots and counts["canonical_revisions"] is None:
+        raise HostConfigError("retention.canonical_roots", "requires canonical_revisions")
+    interval = data.get("interval_hours")
+    if interval is not None:
+        if type(interval) not in (int, float) or not 0.01 <= interval <= 8760:
+            raise HostConfigError("retention.interval_hours", "expected 0.01 <= hours <= 8760")
+        if counts["workspace_days"] is None and counts["canonical_revisions"] is None:
+            raise HostConfigError("retention.interval_hours", "requires workspace_days or canonical_revisions")
+    return RetentionConfig(counts["workspace_days"], counts["canonical_revisions"], tuple(roots),
+                           None if interval is None else float(interval))
 
 
 def _closed(field: str, data: Any, allowed: set[str]) -> None:

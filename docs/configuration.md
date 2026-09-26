@@ -82,10 +82,11 @@ See [versions](versions.md).
 | --- | --- |
 | Process | `process.created`, `process.state`, `process.outcome`, `process.result`, `process.control`, `process.retry`, `process.intervention`, `process.recovery` |
 | Authority | `capability.issued`, `capability.delegated`, `capability.revoked`, `capability.decision` |
-| Workspace | `workspace.committed`, `workspace.rolled_back` |
+| Workspace | `workspace.committed`, `workspace.rolled_back`, `transaction.staged`, `transaction.recovered`, `transaction.abandoned` |
 | Effects | `effect.applying`, `effect.applied` |
 | Workers | `worker.registered`, `worker.placed`, `worker.dispatch_pending`, `worker.execution_started`, `worker.execution_completed`, `worker.execution_fenced`, `worker.heartbeat` |
 | Accounting | `usage.recorded` |
+| Retention | `retention.removed` |
 | Knowledge | `knowledge.published` |
 
 `workspace.committed` is the only event that proves canonical publication.

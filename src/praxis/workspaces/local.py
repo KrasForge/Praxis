@@ -1,8 +1,11 @@
 """Local directory workspaces. This provider is not an OS process sandbox."""
 
+import fcntl
 import hashlib
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 import stat
 import shutil
 from pathlib import Path
@@ -57,7 +60,22 @@ class LocalWorkspaces:
         except (OSError, ValueError, KeyError) as exc:
             raise WorkspaceError("invalid or unavailable workspace") from exc
 
+    @contextmanager
+    def snapshot_lock(self, *, exclusive: bool = False) -> Iterator[None]:
+        """Snapshots share this lock; retention holds it exclusively to remove blobs.
+
+        A snapshot reuses an existing blob without rewriting it, so a blob that looks
+        unreferenced must not disappear while another snapshot is being written.
+        """
+        with (self.root / "snapshot.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+
     def snapshot(self, handle: WorkspaceHandle) -> Snapshot:
+        with self.snapshot_lock():
+            return self._snapshot(handle)
+
+    def _snapshot(self, handle: WorkspaceHandle) -> Snapshot:
         path = self.path_for(handle, handle.process_id)
         blobs = self.root / "blobs"
         blobs.mkdir(exist_ok=True, mode=0o700)
@@ -94,6 +112,21 @@ class LocalWorkspaces:
         snapshots.mkdir(exist_ok=True, mode=0o700)
         (snapshots / identity).write_bytes(manifest)
         return Snapshot(handle.workspace_id, identity, tuple(entries))
+
+    def load_snapshot(self, workspace_id: str, snapshot_id: str) -> Snapshot:
+        """Read a recorded manifest back, refusing one whose bytes or blobs changed."""
+        try:
+            manifest = (self.root / "snapshots" / snapshot_id).read_bytes()
+            if hashlib.sha256(manifest).hexdigest() != snapshot_id:
+                raise WorkspaceError("corrupt snapshot")
+            entries = tuple((str(relative), str(digest)) for relative, digest in json.loads(manifest))
+            for _, digest in entries:
+                blob = (self.root / "blobs" / digest).read_bytes()
+                if hashlib.sha256(blob).hexdigest() != digest:
+                    raise WorkspaceError("corrupt snapshot blob")
+        except (OSError, ValueError, TypeError) as exc:
+            raise WorkspaceError("snapshot unavailable") from exc
+        return Snapshot(workspace_id, snapshot_id, entries)
 
     def diff(self, handle: WorkspaceHandle, baseline: Snapshot) -> WorkspaceDiff:
         if baseline.workspace_id != handle.workspace_id:

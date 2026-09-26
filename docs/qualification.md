@@ -1,6 +1,6 @@
-# v1.1.0 release qualification
+# v1.2.0 release qualification
 
-Praxis qualified this release on 2026-09-26. Package 1.1.0 uses the v1 wire
+Praxis qualified this release on 2026-09-26. Package 1.2.0 uses the v1 wire
 contracts and SQLite layout 2.
 
 The reproducible gate builds an sdist and then builds its wheel. It installs
@@ -17,8 +17,8 @@ uv sync --locked
 uv run python scripts/qualify.py
 ```
 
-Local qualification: 415 tests passed. Ruff passed. mypy passed across 103
-source files. All six example checks passed. The CLI reported praxis 1.1.0.
+Local qualification: 441 tests passed. Ruff passed. mypy passed across 104
+source files. All six example checks passed. The CLI reported praxis 1.2.0.
 
 CI runs the source tests and examples on Python 3.11, 3.12, 3.13 and 3.14. It
 also runs the fresh-wheel qualification on 3.12. These checks are the gate for a
@@ -65,7 +65,9 @@ that you modified, and do not qualify a gate that you ran only in part.
 | --- | --- |
 | Lifecycle and controls | The runtime, lifecycle, controls, joins, supervisor and retry suites |
 | Verification and canonical publication | The verified_execution, transaction, rollback, validators and selection suites, and the verified artifact in the demo |
-| Recovery and persistence | The checkpoints, durable_ordering, migrations and orphan_recovery suites, and the reopened database in the demo |
+| Recovery and persistence | The checkpoints, durable_ordering, migrations, orphan_recovery and transaction_recovery suites, and the reopened database in the demo |
+| Retention | The retention suite: every keep rule, dry run, journaling, canonical pruning, and recovery and staged commits after a sweep |
+| Live acceptance harness | The acceptance suite against local stand-ins: skips without credentials, passes when providers behave, and fails on a leaked credential |
 | Graphs | The graph, graph_resolution and graph_store suites, and the stored dependencies in the demo |
 | Effects and approvals | The effects, effect_service, approvals, effect_replay and publication suites |
 | Adapters | The all_executors conformance suite, real local and shell processes, and the offline protocol fixtures for Codex, Claude and DeepSeek |
@@ -84,7 +86,14 @@ nobody verified, a changed request of the policy, and an unsafe replay.
 A completed ordinary process that has no canonical target is not a committed
 artifact. Only `workspace.committed` proves that action.
 
-Version 1.1.0 adds the deployment host. It also adds a check before launch:
+Version 1.2.0 rebuilds staged candidate transactions after a restart, or
+abandons them when they can no longer commit the verified snapshot (ADR 0005).
+It adds retention for workspaces, snapshots and canonical revisions (ADR 0006),
+and the opt-in live [acceptance suite](acceptance.md). Codex now receives its
+credentials through secret bindings. The wire contracts and the SQLite layout
+did not change.
+
+Version 1.1.0 added the deployment host. It also added a check before launch:
 local work fails with `executable_not_in_sandbox` when `argv[0]` resolves
 outside the sandbox mounts. The wire contracts and the SQLite layout did not
 change.
@@ -102,7 +111,8 @@ after it writes the children. These regressions run in the full gate.
   versions of an SDK or API; the credentials; the confinement of a worker; the
   networking of a provider; and the real external effects. The fixtures qualify
   the semantics of mapping and errors. They do not qualify the availability of
-  an external service.
+  an external service. The opt-in [acceptance suite](acceptance.md) checks
+  these against live services; its records list what was accepted, and when.
 - Local isolation is Linux and Bubblewrap, with an explicit allowlist of runtime
   images. Another platform needs a worker that you qualified independently. The
   cgroups and quotas of your host give the containment for CPU, memory, PIDs and
@@ -114,8 +124,9 @@ after it writes the children. These regressions run in the full gate.
   restore that Praxis does not support stays explicit. The overhead of a native
   launch, and the startup of a provider, still need deadlines from the host.
 - CanonicalDirectory is a managed store of versions. It is not a general
-  transaction manager for Git. Praxis does not rebuild the staged candidate
-  transaction objects after a restart. The readiness of a graph, and the
+  transaction manager for Git. Praxis rebuilds a staged candidate transaction
+  after a restart only when it can still commit the verified snapshot; otherwise
+  it abandons the transaction. The readiness of a graph, and the
   scheduling of a distributed API, need orchestration from the host.
 - These conditions need reconciliation: an uncertain effect that you cannot
   replay; remote work with no fence; a canonical revision that Praxis committed;
@@ -127,8 +138,9 @@ after it writes the children. These regressions run in the full gate.
   privileged data about processes and capabilities. Configure the capabilities
   of your operators before you attach the kernel journal. A runtime capability
   event needs the lineage of the process.
-- Praxis has no daemon for the retention of storage, no distributed consensus
-  and no remote attestation. The core package has no dependency on an ASGI
+- Retention removes expired workspaces, snapshots and canonical revisions, but
+  it never compacts the journal, so the journal grows with the work. Praxis has
+  no distributed consensus and no remote attestation. The core package has no dependency on an ASGI
   server. The optional `praxis.host` gives ownership per client, delegated
   identities, TLS and in-memory admission limits for one controller. It does not
   give distributed rate limits or placement across controllers, and it needs a

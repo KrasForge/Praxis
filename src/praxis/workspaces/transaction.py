@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import os
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,6 +16,29 @@ from praxis.kernel.events import Event
 from praxis.validators.policy import VerificationReport
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import Snapshot, WorkspaceError, WorkspaceHandle
+
+
+def staged_transactions(events: Iterable[Event]) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+    """Replay the journal into staged transactions still pending, and those abandoned.
+
+    A transaction is pending from transaction.staged until workspace.committed,
+    workspace.rolled_back or candidate.released closes it, or transaction.abandoned
+    refuses it. An abandoned transaction stays refused until the process stages again.
+    Recovery and retention both rely on this one reading of the journal.
+    """
+    pending: dict[str, dict[str, object]] = {}
+    abandoned: dict[str, str] = {}
+    for event in events:
+        if event.type == "transaction.staged":
+            pending[event.process_id] = dict(event.payload)
+            abandoned.pop(event.process_id, None)
+        elif event.type == "transaction.abandoned":
+            pending.pop(event.process_id, None)
+            abandoned[event.process_id] = str(event.payload.get("reason"))
+        elif event.type in ("workspace.committed", "workspace.rolled_back", "candidate.released"):
+            pending.pop(event.process_id, None)
+            abandoned.pop(event.process_id, None)
+    return pending, abandoned
 
 
 class CanonicalDirectory:
@@ -33,6 +57,13 @@ class CanonicalDirectory:
                 (self.versions / revision / "tree").mkdir(parents=True)
                 self.pointer.symlink_to(Path("versions") / revision / "tree")
 
+    @classmethod
+    def open(cls, root: Path) -> "CanonicalDirectory":
+        """Open an existing store without creating one, as recovery must."""
+        if not (root / "current").is_symlink():
+            raise WorkspaceError("canonical directory unavailable")
+        return cls(root)
+
     @property
     def path(self) -> Path:
         path = self.pointer.resolve(strict=True)
@@ -47,11 +78,7 @@ class CanonicalDirectory:
 
 class WorkspaceTransaction:
     def __init__(self, provider: LocalWorkspaces, handle: WorkspaceHandle, canonical: CanonicalDirectory):
-        self.provider = provider
-        self.handle = handle
-        self.canonical = canonical
-        self.events: list[Event] = []
-        self.committed = False
+        self._bind(provider, handle, canonical)
         staged = provider.path_for(handle, handle.process_id)
         if any(staged.iterdir()):
             raise WorkspaceError("transaction requires an empty staged workspace")
@@ -60,6 +87,38 @@ class WorkspaceTransaction:
             self.baseline_revision = canonical.revision
             shutil.copytree(canonical.path, staged, dirs_exist_ok=True, symlinks=True)
             self.baseline = provider.snapshot(handle)
+
+    def _bind(self, provider: LocalWorkspaces, handle: WorkspaceHandle, canonical: CanonicalDirectory) -> None:
+        self.provider = provider
+        self.handle = handle
+        self.canonical = canonical
+        self.events: list[Event] = []
+        self.committed = False
+
+    @classmethod
+    def resume(cls, provider: LocalWorkspaces, handle: WorkspaceHandle, canonical: CanonicalDirectory,
+               baseline_revision: str, baseline: Snapshot) -> "WorkspaceTransaction":
+        """Rebuild a staged transaction after restart without re-copying the baseline.
+
+        commit() still re-checks the verified snapshot, the baseline revision and the
+        baseline tree under the canonical lock, so a resumed transaction is held to the
+        same conditions as one that never left memory.
+        """
+        if baseline.workspace_id != handle.workspace_id:
+            raise WorkspaceError("snapshot workspace mismatch")
+        transaction = cls.__new__(cls)
+        transaction._bind(provider, handle, canonical)
+        transaction.baseline_revision = baseline_revision
+        transaction.baseline = baseline
+        return transaction
+
+    def record(self, snapshot_id: str) -> dict[str, str]:
+        """The durable facts recovery needs to rebuild this transaction."""
+        return {
+            "workspace_id": self.handle.workspace_id, "snapshot_id": snapshot_id,
+            "canonical_root": str(self.canonical.root), "baseline_revision": self.baseline_revision,
+            "baseline_snapshot_id": self.baseline.snapshot_id,
+        }
 
     def commit(self, report: VerificationReport) -> Event:
         if self.committed:

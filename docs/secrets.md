@@ -23,6 +23,10 @@ Do not put a credential in the environment, the configuration or the inputs.
 Those fields are ordinary stored data. Praxis converts an exception from a
 provider into a stable error that holds no exception text.
 
+`CodexExecutor` takes the same `secrets` and `secret_bindings`, for example
+`{"CODEX_API_KEY": "codex/api-key"}`. It redacts the delivered value from the
+outcome and from the events of the Codex stream.
+
 A remote worker and a third-party agent SDK must resolve credentials locally,
 through trusted adapters of the host. A value that the controller resolved must
 never go into a dispatch envelope.
