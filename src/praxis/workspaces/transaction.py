@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import os
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,6 +16,29 @@ from praxis.kernel.events import Event
 from praxis.validators.policy import VerificationReport
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import Snapshot, WorkspaceError, WorkspaceHandle
+
+
+def staged_transactions(events: Iterable[Event]) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+    """Replay the journal into staged transactions still pending, and those abandoned.
+
+    A transaction is pending from transaction.staged until workspace.committed,
+    workspace.rolled_back or candidate.released closes it, or transaction.abandoned
+    refuses it. An abandoned transaction stays refused until the process stages again.
+    Recovery and retention both rely on this one reading of the journal.
+    """
+    pending: dict[str, dict[str, object]] = {}
+    abandoned: dict[str, str] = {}
+    for event in events:
+        if event.type == "transaction.staged":
+            pending[event.process_id] = dict(event.payload)
+            abandoned.pop(event.process_id, None)
+        elif event.type == "transaction.abandoned":
+            pending.pop(event.process_id, None)
+            abandoned[event.process_id] = str(event.payload.get("reason"))
+        elif event.type in ("workspace.committed", "workspace.rolled_back", "candidate.released"):
+            pending.pop(event.process_id, None)
+            abandoned.pop(event.process_id, None)
+    return pending, abandoned
 
 
 class CanonicalDirectory:

@@ -128,8 +128,9 @@ after it writes the children. These regressions run in the full gate.
   privileged data about processes and capabilities. Configure the capabilities
   of your operators before you attach the kernel journal. A runtime capability
   event needs the lineage of the process.
-- Praxis has no daemon for the retention of storage, no distributed consensus
-  and no remote attestation. The core package has no dependency on an ASGI
+- Retention removes expired workspaces, snapshots and canonical revisions, but
+  it never compacts the journal, so the journal grows with the work. Praxis has
+  no distributed consensus and no remote attestation. The core package has no dependency on an ASGI
   server. The optional `praxis.host` gives ownership per client, delegated
   identities, TLS and in-memory admission limits for one controller. It does not
   give distributed rate limits or placement across controllers, and it needs a

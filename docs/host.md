@@ -166,6 +166,22 @@ leave kernel state half-applied, so only the response is abandoned. Clients re-i
 the process to learn the result. Counts of each rejection kind are kept in
 `HostApplication.limiter.rejections` and logged with the acting identity.
 
+## Retention
+
+```toml
+[retention]
+workspace_days = 14                 # terminal workspaces and unreferenced snapshots
+canonical_revisions = 5             # superseded revisions kept besides the current one
+canonical_roots = ["/srv/canonical"]  # needs canonical_revisions
+interval_hours = 6                  # optional: sweep in the background
+```
+
+Every key is optional. Without `interval_hours` the host never sweeps by itself.
+`python -m praxis.host retention --config host.toml` prints what the policy would
+remove, and `--apply` removes it. The command opens only the database and the
+workspaces. It is safe beside a running host. The rules are in
+[operations](operations.md#retention). A change to `[retention]` needs a restart.
+
 ## Reloading without a restart
 
 `SIGHUP` re-reads the config file given to `serve`, or `PRAXIS_HOST_CONFIG` under
@@ -216,3 +232,4 @@ authenticated itself: Praxis trusts the delegating client for that assertion.
 - Distributed rate limiting: limits are per host process.
 - Removing a trusted client CA without a restart.
 - Multi-controller placement: the host is one kernel owner, as in [operations](operations.md).
+- Journal compaction: retention removes files, never process records or events.

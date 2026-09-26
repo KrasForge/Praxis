@@ -34,7 +34,7 @@ from praxis.storage.protocol import ProcessStore, StoredEvent
 from praxis.storage.journal import EventJournal
 from praxis.validators.policy import VerificationReport, evaluate
 from praxis.validators.protocol import CheckResult, CheckStatus, ValidationInput, Validator
-from praxis.workspaces.transaction import CanonicalDirectory, WorkspaceTransaction
+from praxis.workspaces.transaction import CanonicalDirectory, WorkspaceTransaction, staged_transactions
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
 
@@ -480,18 +480,9 @@ class Kernel:
         hashes to that snapshot, and the baseline manifest survives for rollback. Anything
         else is journaled as abandoned and refused at commit.
         """
-        pending: dict[str, dict[str, object]] = {}
-        for event in self.events:
-            if event.type == "transaction.staged":
-                pending[event.process_id] = dict(event.payload)
-                self.abandoned_transactions.pop(event.process_id, None)
-            elif event.type == "transaction.abandoned":
-                # Stays refused across every later restart, not only the one that found it.
-                pending.pop(event.process_id, None)
-                self.abandoned_transactions[event.process_id] = str(event.payload.get("reason"))
-            elif event.type in ("workspace.committed", "workspace.rolled_back", "candidate.released"):
-                pending.pop(event.process_id, None)
-                self.abandoned_transactions.pop(event.process_id, None)
+        # An abandonment stays refused across every later restart, not only the one that found it.
+        pending, abandoned = staged_transactions(self.events)
+        self.abandoned_transactions = abandoned
         for process_id, record in pending.items():
             process = self.processes.get(process_id)
             snapshot_id = str(record.get("snapshot_id"))

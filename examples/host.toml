@@ -48,3 +48,8 @@ client_requests_per_minute = 1200
 submit_per_minute = 20
 max_streams = 4
 request_timeout_seconds = 30
+
+# Remove expired workspaces and snapshots; see docs/operations.md#retention.
+[retention]
+workspace_days = 14
+interval_hours = 6

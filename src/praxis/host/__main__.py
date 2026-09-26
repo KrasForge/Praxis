@@ -1,4 +1,4 @@
-"""Operator commands: ``python -m praxis.host {token,check,serve}``."""
+"""Operator commands: ``python -m praxis.host {token,check,serve,retention}``."""
 
 import argparse
 import importlib
@@ -21,6 +21,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--config", type=Path, required=True)
     serve = commands.add_parser("serve", help="serve the control plane with uvicorn")
     serve.add_argument("--config", type=Path, required=True)
+    retention = commands.add_parser("retention", help="report or apply the [retention] policy once")
+    retention.add_argument("--config", type=Path, required=True)
+    retention.add_argument("--apply", action="store_true", help="remove and journal; without it nothing changes")
     args = parser.parse_args(argv)
 
     if args.command == "token":
@@ -41,6 +44,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if missing:
         print("missing files: " + ", ".join(missing), file=sys.stderr)
         return 2
+    if args.command == "retention":
+        if not config.retention.enabled:
+            print("no [retention] policy: set workspace_days or canonical_revisions", file=sys.stderr)
+            return 2
+        from praxis.host.app import retention_sweep
+        from praxis.storage.sqlite import SQLiteStore
+        from praxis.workspaces.local import LocalWorkspaces
+        root = Path(config.data_dir).resolve()
+        if not (root / "runtime.db").is_file():
+            print(f"no runtime database under {root}", file=sys.stderr)
+            return 2
+        store = SQLiteStore(root / "runtime.db")
+        try:
+            report = retention_sweep(config, store, LocalWorkspaces(root / "workspaces"), apply=args.apply)
+        finally:
+            store.close()
+        print(report.to_json())
+        return 0
     if args.command == "check":
         tls = ("mutual TLS" if config.server.tls_client_ca else "TLS" if config.server.tls
                else "TLS terminated upstream" if config.server.tls_terminated_upstream else "loopback only")

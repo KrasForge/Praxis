@@ -86,6 +86,7 @@ See [versions](versions.md).
 | Effects | `effect.applying`, `effect.applied` |
 | Workers | `worker.registered`, `worker.placed`, `worker.dispatch_pending`, `worker.execution_started`, `worker.execution_completed`, `worker.execution_fenced`, `worker.heartbeat` |
 | Accounting | `usage.recorded` |
+| Retention | `retention.removed` |
 | Knowledge | `knowledge.published` |
 
 `workspace.committed` is the only event that proves canonical publication.

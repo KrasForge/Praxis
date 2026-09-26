@@ -141,5 +141,38 @@ is unknown; it is not proof of zero cost. Keep the quotas for cgroups, processes
 and disk outside the kernel. Where a hard wall limit matters, use request
 deadlines and an executor that can cancel.
 
-Workspace retention, logs and backups need retention policies from the host.
-Version 1 has no daemon for quotas or for garbage collection.
+### Retention
+
+Workspaces, snapshot blobs and canonical revisions grow until you remove them.
+The retention sweep removes only the state that no recovery path can still use:
+
+| Item | Praxis removes it when | Praxis keeps it when |
+| --- | --- | --- |
+| Workspace | Its process has been terminal for `workspace_days` | The process is not terminal or is not in the store; the workspace holds a pending staged transaction; the process has an uncertain effect |
+| Snapshot manifest | Nothing references it, and it is older than `workspace_days` | A pending staged transaction or a checkpoint references it |
+| Blob | No kept manifest references it, and it is older than `workspace_days` | A kept manifest references it |
+| Canonical revision | It is older than the newest `canonical_revisions` superseded revisions | It is current, or it is the baseline of a pending staged transaction |
+
+If a process that is not terminal is older than `workspace_days`, the sweep
+keeps every manifest and blob. That process can still roll back to its
+baseline. The sweep takes the canonical lock before it removes a revision, and
+it takes the snapshot lock before it removes a blob.
+
+Run it on demand. Without `--apply` it only reports:
+
+```sh
+praxis retention --db data/runtime.db --workspaces data/workspaces \
+    --workspace-days 14 --canonical /srv/canonical --canonical-revisions 5
+praxis retention ... --apply
+```
+
+`--apply` removes the items and journals a `retention.removed` event on the
+process that owned each workspace or revision. It also writes the full report to
+`<workspaces>/retention/<milliseconds>.json`. The sweep reads the store, but it
+does not recover a kernel. You can run it beside a live controller. The
+[host](host.md#retention) can run it on a schedule.
+
+The sweep does not compact the journal. The process records and events are the
+audit trail. They are also the idempotency record for submissions, effects and
+publication. See [ADR 0002](adr/0002-retention-excludes-the-journal.md). Logs and
+backups still need retention policies from the host.
