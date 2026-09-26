@@ -169,10 +169,11 @@ praxis retention ... --apply
 `--apply` removes the items and journals a `retention.removed` event on the
 process that owned each workspace or revision. It also writes the full report to
 `<workspaces>/retention/<milliseconds>.json`. The sweep reads the store, but it
-does not recover a kernel. You can run it beside a live controller. The
-[host](host.md#retention) can run it on a schedule.
+does not recover a kernel, so a dry run is safe beside a live controller. Apply
+a standalone sweep only while the controller is stopped. On a live host, let the
+[host](host.md#retention) run the sweep on a schedule, inside the controller.
 
 The sweep does not compact the journal. The process records and events are the
 audit trail. They are also the idempotency record for submissions, effects and
-publication. See [ADR 0002](adr/0002-retention-excludes-the-journal.md). Logs and
+publication. See [ADR 0006](adr/0006-retention-excludes-the-journal.md). Logs and
 backups still need retention policies from the host.

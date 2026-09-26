@@ -1,6 +1,8 @@
-# 0001: Recover staged candidate transactions from the journal
+# 0005. Recover staged candidate transactions from the journal
 
-- **Status:** Accepted, 2026-09-26
+- **Status:** Accepted
+- **Date:** 2026-09-26
+- **Supersedes:** none
 - **Issue:** #249
 
 ## Context
@@ -63,7 +65,3 @@ run those candidates again.
 - A baseline that moved during the outage, including a second restart.
 - A tampered workspace, a deleted workspace and a lost baseline manifest.
 - A canonical directory that was removed.
-
-## Supersedes
-
-None.

@@ -10,7 +10,7 @@ The sweep removes only state that no recovery path can still need. It never remo
   or any blob that a kept manifest references.
 
 It does not compact the journal. Process records and events are the audit trail and
-the idempotency record for submissions, effects and publication; see ADR 0002.
+the idempotency record for submissions, effects and publication; see ADR 0006.
 """
 
 import fcntl
@@ -189,6 +189,10 @@ class _Sweep:
                 continue
             item = RetentionItem("workspace", workspace_id, "terminal_expired", owner,
                                  _size(path) if path.exists() else 0)
+            if not self.dry_run and not self.still_expired(owner):
+                # The owner moved on since the sweep started, for example a retry began.
+                self.kept.append(RetentionItem("workspace", workspace_id, "process_active", owner))
+                continue
             if not self.dry_run:
                 try:
                     self.provider.destroy(WorkspaceHandle(workspace_id, owner, "local"))
@@ -199,6 +203,21 @@ class _Sweep:
                         continue
                     record_path.unlink()
             self.removed.append(item)
+
+    def still_expired(self, owner: str) -> bool:
+        """Re-read the owner just before removal instead of trusting the opening snapshot."""
+        try:
+            process = self.store.load(owner)
+        except StoreError:
+            return False
+        if process.state not in TERMINAL:
+            return False
+        last = None
+        for entry in self.store.read_events(owner):
+            if entry.event.type == "process.state":
+                last = entry.event
+        return (last is not None and last.payload.get("state") in {s.value for s in TERMINAL}
+                and _epoch(last.timestamp) <= self.cutoff())
 
     def snapshots(self) -> None:
         cutoff = self.cutoff()

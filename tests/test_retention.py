@@ -241,3 +241,47 @@ def test_cli_reports_and_applies(tmp_path):
     assert not any((tmp_path / "workspaces" / "data").iterdir())
     bad = subprocess.run([*command[:-1], "-1"], capture_output=True, text=True)
     assert bad.returncode == 2 and "workspace_days" in bad.stderr
+
+
+def test_a_retry_that_starts_during_the_sweep_keeps_its_workspace(tmp_path):
+    from praxis.executors.outcomes import Outcome, OutcomeStatus
+    from praxis.kernel.retry import RetryPolicy
+
+    async def exercise():
+        store = SQLiteStore(tmp_path / "runtime.db")
+        workspaces = LocalWorkspaces(tmp_path / "workspaces")
+        failing = FakeExecutor(Outcome(OutcomeStatus.FAILED, "boom", retryable=True))
+        kernel = Kernel(store, workspaces, {"writer": failing}, retain_workspaces=True,
+                        authority=Authority(execution_defaults=frozenset({"writer"})))
+        process = kernel.create(ProcessSpec("t", "writer"))
+        kernel.start(process.process_id)
+        await kernel.tasks[process.process_id]
+        workspace_id = kernel.handles[process.process_id].workspace_id
+        stale = store.load(process.process_id)
+
+        class OpeningSnapshot:
+            """Serves the sweep's opening read from before the retry, and live reads after it."""
+
+            def __init__(self):
+                self.opened = False
+
+            def __getattr__(self, name):
+                return getattr(store, name)
+
+            def load(self, identity):
+                if not self.opened:
+                    return stale
+                return store.load(identity)
+
+            def read_events(self, process_id=None, *, after=0):
+                if process_id is None:
+                    self.opened = True
+                return store.read_events(process_id, after=after)
+
+        await kernel.retry(process.process_id, RetryPolicy(max_attempts=3), start=False)
+        report = sweep(OpeningSnapshot(), workspaces, RetentionPolicy(workspace_days=0), now=LATER, dry_run=False,
+                       journal=kernel.events)
+        assert [item.identity for item in kept(report, "process_active")] == [workspace_id]
+        assert (tmp_path / "workspaces" / "data" / workspace_id).is_dir()
+        store.close()
+    asyncio.run(exercise())

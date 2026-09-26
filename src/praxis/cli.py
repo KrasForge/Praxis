@@ -31,7 +31,7 @@ def retention(argv: Sequence[str]) -> int:
     parser.add_argument("--workspace-days", type=int, help="keep terminal workspaces and unreferenced snapshots this long")
     parser.add_argument("--canonical-revisions", type=int,
                         help="superseded canonical revisions to keep besides the current one")
-    parser.add_argument("--apply", action="store_true", help="remove and journal; without it nothing changes")
+    parser.add_argument("--apply", action="store_true", help="remove and journal (stop the controller first); without it nothing changes")
     parser.add_argument("--json", action="store_true", help="print the full report as JSON")
     options = parser.parse_args(argv)
 

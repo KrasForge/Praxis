@@ -179,7 +179,9 @@ interval_hours = 6                  # optional: sweep in the background
 Every key is optional. Without `interval_hours` the host never sweeps by itself.
 `python -m praxis.host retention --config host.toml` prints what the policy would
 remove, and `--apply` removes it. The command opens only the database and the
-workspaces. It is safe beside a running host. The rules are in
+workspaces, so the report is safe beside a running host. Use `--apply` only
+while the host is stopped. A running host applies the policy through
+`interval_hours`, inside its own controller. The rules are in
 [operations](operations.md#retention). A change to `[retention]` needs a restart.
 
 ## Reloading without a restart

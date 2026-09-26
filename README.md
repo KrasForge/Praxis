@@ -215,7 +215,7 @@ the [threat model](docs/threat-model.md) and [isolation](docs/isolation.md).
 ## Development
 
 ```sh
-uv run pytest          # 440 tests
+uv run pytest          # 441 tests
 uv run pytest acceptance -rs   # opt-in live checks; see docs/acceptance.md
 uv run ruff check .
 uv run mypy            # strict, over src/

@@ -23,7 +23,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve.add_argument("--config", type=Path, required=True)
     retention = commands.add_parser("retention", help="report or apply the [retention] policy once")
     retention.add_argument("--config", type=Path, required=True)
-    retention.add_argument("--apply", action="store_true", help="remove and journal; without it nothing changes")
+    retention.add_argument("--apply", action="store_true", help="remove and journal (stop the controller first); without it nothing changes")
     args = parser.parse_args(argv)
 
     if args.command == "token":

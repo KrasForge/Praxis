@@ -17,7 +17,7 @@ uv sync --locked
 uv run python scripts/qualify.py
 ```
 
-Local qualification: 440 tests passed. Ruff passed. mypy passed across 104
+Local qualification: 441 tests passed. Ruff passed. mypy passed across 104
 source files. All six example checks passed. The CLI reported praxis 1.2.0.
 
 CI runs the source tests and examples on Python 3.11, 3.12, 3.13 and 3.14. It
@@ -87,8 +87,8 @@ A completed ordinary process that has no canonical target is not a committed
 artifact. Only `workspace.committed` proves that action.
 
 Version 1.2.0 rebuilds staged candidate transactions after a restart, or
-abandons them when they can no longer commit the verified snapshot (ADR 0001).
-It adds retention for workspaces, snapshots and canonical revisions (ADR 0002),
+abandons them when they can no longer commit the verified snapshot (ADR 0005).
+It adds retention for workspaces, snapshots and canonical revisions (ADR 0006),
 and the opt-in live [acceptance suite](acceptance.md). Codex now receives its
 credentials through secret bindings. The wire contracts and the SQLite layout
 did not change.

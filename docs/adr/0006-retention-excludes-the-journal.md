@@ -1,6 +1,8 @@
-# 0002: Retention removes files, never the journal
+# 0006. Retention removes files, never the journal
 
-- **Status:** Accepted, 2026-09-26
+- **Status:** Accepted
+- **Date:** 2026-09-26
+- **Supersedes:** none
 - **Issue:** #248
 
 ## Context
@@ -29,7 +31,7 @@ for a long time. The process records and events are more than a log:
    - unreferenced snapshot manifests and blobs
    - superseded canonical revisions
 2. The rules are strict. A workspace stays when its process is not terminal or is
-   unknown, when it holds a pending staged transaction (ADR 0001), or when the
+   unknown, when it holds a pending staged transaction (ADR 0005), or when the
    process has an uncertain effect. A manifest stays when a pending staged
    transaction or a checkpoint references it. A blob stays when a kept manifest
    references it. The current revision and the baseline of a pending staged
@@ -51,8 +53,11 @@ for a long time. The process records and events are more than a log:
 - The journal still grows. The deployment limits say this.
 - An abandoned staged workspace is kept until it expires. After that it is
   removed, because its bytes are only material for diagnosis.
-- An operator can preview a sweep and run it beside a live controller. The sweep
-  never recovers a kernel.
+- An operator can preview a sweep beside a live controller, because the sweep
+  never recovers a kernel. To apply it on a live data directory, use the host's
+  scheduled sweep, which runs inside the single controller. A standalone
+  `--apply` is for a stopped controller. It re-reads each owner before it
+  removes a workspace, but it cannot exclude every race with a live retry.
 
 ## Compatibility
 
@@ -73,7 +78,3 @@ envelope. The host config gains an optional `[retention]` table.
 
 `tests/test_host_operations.py` covers the host configuration, the command and
 the scheduled sweep.
-
-## Supersedes
-
-None.

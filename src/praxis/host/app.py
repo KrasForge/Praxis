@@ -382,8 +382,8 @@ def noesis_http_transport(config: NoesisConfig, token: str) -> HTTPTransport:
 
 def retention_sweep(config: HostConfig, store: SQLiteStore, workspaces: LocalWorkspaces, *, apply: bool,
                     journal: list[Any] | None = None) -> RetentionReport:
-    """Apply the [retention] policy once. It needs only the store and workspaces, never a
-    recovered kernel, so an operator can run it beside a live host."""
+    """Apply the [retention] policy once with only the store and workspaces, never a
+    recovered kernel. Beside a live host, report only; apply while it is stopped."""
     retention = config.retention
     report = sweep(store, workspaces, RetentionPolicy(retention.workspace_days, retention.canonical_revisions),
                    canonical=[Path(root) for root in retention.canonical_roots], dry_run=not apply,
