@@ -1,0 +1,70 @@
+"""Operator commands: ``python -m praxis.host {token,check,serve}``."""
+
+import argparse
+import importlib
+import ssl
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+from praxis.host.auth import new_token
+from praxis.host.config import HostConfigError, load_host_config
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m praxis.host", description="Praxis host for Modulo and Noesis")
+    commands = parser.add_subparsers(dest="command", required=True)
+    token = commands.add_parser("token", help="generate a client token and the digest for the config")
+    token.add_argument("--client", required=True, help="client id the token is for")
+    check = commands.add_parser("check", help="validate the host config and referenced files")
+    check.add_argument("--config", type=Path, required=True)
+    serve = commands.add_parser("serve", help="serve the control plane with uvicorn")
+    serve.add_argument("--config", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    if args.command == "token":
+        value, digest = new_token()
+        print(f"token for {args.client} (give to the client once; it is not stored):\n  {value}", file=sys.stderr)
+        print(f'[[clients]]\nid = "{args.client}"\ntoken_sha256 = "{digest}"\nroles = ["submit", "read"]')
+        return 0
+    try:
+        config = load_host_config(args.config)
+    except HostConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    files = [config.server.tls_certfile, config.server.tls_keyfile, config.server.tls_client_ca]
+    if config.noesis is not None:
+        files += [config.noesis.token_file, config.noesis.ca_file, config.noesis.client_certfile,
+                  config.noesis.client_keyfile]
+    missing = [name for name in dict.fromkeys(files) if name is not None and not Path(name).is_file()]
+    if missing:
+        print("missing files: " + ", ".join(missing), file=sys.stderr)
+        return 2
+    if args.command == "check":
+        tls = ("mutual TLS" if config.server.tls_client_ca else "TLS" if config.server.tls
+               else "TLS terminated upstream" if config.server.tls_terminated_upstream else "loopback only")
+        publication = "disabled" if config.noesis is None else config.noesis.publication
+        print(f"ok: {len(config.clients)} client(s), {tls}, Noesis publication {publication}")
+        return 0
+    try:
+        uvicorn = importlib.import_module("uvicorn")
+    except ImportError:
+        print("serve requires an ASGI server: uv run --with uvicorn python -m praxis.host serve ...", file=sys.stderr)
+        return 2
+    from praxis.host.app import build_host
+
+    host = build_host(config)
+    server = config.server
+    try:
+        uvicorn.run(host.app, host=server.host, port=server.port, lifespan="on", server_header=False,
+                    proxy_headers=server.tls_terminated_upstream,
+                    ssl_certfile=server.tls_certfile, ssl_keyfile=server.tls_keyfile,
+                    ssl_ca_certs=server.tls_client_ca,
+                    ssl_cert_reqs=ssl.CERT_REQUIRED if server.tls_client_ca else ssl.CERT_NONE)
+    finally:
+        host.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
