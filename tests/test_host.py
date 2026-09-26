@@ -316,6 +316,12 @@ def test_transport_mutual_tls(tmp_path):
             await HTTPTransport(base, ssl_context=anonymous).request("GET", "/")
         with pytest.raises(TransportError, match="transport_unavailable"):  # untrusted server certificate
             await HTTPTransport(base).request("GET", "/")
+        # The client SDK reaches a host the way Modulo does: private CA plus client certificate.
+        from praxis.client.http import ClientHTTPTransport
+        reply = await ClientHTTPTransport(base, ssl_context=mutual).request("GET", "/")
+        assert (reply.status, reply.body) == (200, {"client": "client"})
+        with pytest.raises(TransportError, match="transport_unavailable"):
+            await ClientHTTPTransport(base, ssl_context=anonymous).request("GET", "/")
     try:
         asyncio.run(exercise())
     finally:

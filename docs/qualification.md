@@ -102,7 +102,8 @@ after it writes the children. These regressions run in the full gate.
   versions of an SDK or API; the credentials; the confinement of a worker; the
   networking of a provider; and the real external effects. The fixtures qualify
   the semantics of mapping and errors. They do not qualify the availability of
-  an external service.
+  an external service. The opt-in [acceptance suite](acceptance.md) checks
+  these against live services; its records list what was accepted, and when.
 - Local isolation is Linux and Bubblewrap, with an explicit allowlist of runtime
   images. Another platform needs a worker that you qualified independently. The
   cgroups and quotas of your host give the containment for CPU, memory, PIDs and

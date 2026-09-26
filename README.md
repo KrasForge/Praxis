@@ -207,6 +207,7 @@ The index is in [docs/](docs/README.md).
 | [Metrics](docs/metrics.md) | The stable metric names, units and label allowlists |
 | [Versions](docs/versions.md) | The version matrix for the wire and the storage, and the policy |
 | [Qualification](docs/qualification.md) | The v1.1.0 release evidence and the deployment limits |
+| [Acceptance](docs/acceptance.md) | The opt-in live checks against real providers, and their records |
 
 Start with [concepts](docs/concepts.md). Before you host native workloads, read
 the [threat model](docs/threat-model.md) and [isolation](docs/isolation.md).

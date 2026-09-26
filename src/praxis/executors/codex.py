@@ -1,7 +1,9 @@
 """Codex CLI integration; native options never escape the codex namespace.
 
 Interface: https://learn.chatgpt.com/docs/non-interactive-mode
-The host must provision Codex credentials in the explicit process environment.
+Provision Codex credentials through ``secrets`` and ``secret_bindings`` (for example
+``{"CODEX_API_KEY": "codex/api-key"}``), never through ProcessSpec.environment, which
+is stored data. Delivered values are redacted from the outcome and the stream events.
 """
 
 import asyncio
@@ -16,14 +18,16 @@ from praxis.kernel.events import Event
 from praxis.executors.protocol import ControlResult, ExecutionRequest
 from praxis.kernel.authority import Authority
 from praxis.kernel.capabilities import Resource
+from praxis.kernel.secrets import SecretAccess
 from praxis.workspaces.local import LocalWorkspaces
 
 
 class CodexExecutor(LocalProcessExecutor):
     def __init__(self, workspaces: LocalWorkspaces, authority: Authority,
                  executable: str = "codex", event_sink: Callable[[Event], None] | None = None,
-                 *, isolated_worker: bool = False):
-        super().__init__(workspaces, isolation=None)
+                 *, isolated_worker: bool = False, secrets: SecretAccess | None = None,
+                 secret_bindings: dict[str, str] | None = None):
+        super().__init__(workspaces, secrets=secrets, secret_bindings=secret_bindings, isolation=None)
         self.isolated_worker = isolated_worker
         self.authority = authority
         self.executable = executable
@@ -95,6 +99,8 @@ class CodexExecutor(LocalProcessExecutor):
                     raw = json.loads(line)
                     if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
                         raise ValueError("invalid event")
+                    if self.secrets is not None:
+                        raw = self.secrets.redaction.clean(raw)
                     event = Event(request.process_id, "executor.stream", {
                         "attempt_id": attempt_id, "executor": "codex", "codex": raw})
                     event.to_json()
@@ -115,6 +121,9 @@ class CodexExecutor(LocalProcessExecutor):
             self._kill(process)
             await process.wait()
         stderr = (await stderr_task).decode(errors="replace")
+        if self.secrets is not None:
+            stderr = self.secrets.redaction.clean(stderr)
+            messages = [self.secrets.redaction.clean(message) for message in messages]
         if attempt_id in self.cancelled:
             status, reason = OutcomeStatus.CANCELLED, "cancelled"
         elif attempt_id in self.output_limited:
