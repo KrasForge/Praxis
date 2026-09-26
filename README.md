@@ -12,7 +12,7 @@ Praxis is a library and an ASGI service, not an application. Modulo owns the
 human-facing UX; Noesis owns knowledge. Model-specific integrations live in executor
 adapters, never in the kernel.
 
-- **Status:** v1.0.0 — v1 wire contracts, SQLite layout 2. See the
+- **Status:** v1.1.0 — v1 wire contracts, SQLite layout 2. See the
   [qualification report](docs/qualification.md) for coverage and deployment limits.
 - **Requires:** Python 3.11–3.14. Local sandboxed execution requires Linux and
   [Bubblewrap](https://github.com/containers/bubblewrap).
@@ -199,7 +199,7 @@ Indexed in [docs/](docs/README.md).
 | [Redaction](docs/redaction.md) | What is scrubbed before bytes leave the controller |
 | [Metrics](docs/metrics.md) | Stable metric names, units, label allowlists |
 | [Versions](docs/versions.md) | Wire/storage version matrix, compatibility policy |
-| [Qualification](docs/qualification.md) | v1.0.0 release evidence and deployment limits |
+| [Qualification](docs/qualification.md) | v1.1.0 release evidence and deployment limits |
 
 Start with [concepts](docs/concepts.md); read the [threat model](docs/threat-model.md)
 and [isolation](docs/isolation.md) before hosting native workloads.

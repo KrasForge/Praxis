@@ -113,6 +113,8 @@ def test_request_and_submission_rate_limits(tmp_path):
         now[0] = 60.0
         assert (await call(app, "GET", "/v1/processes/missing", MODULO, headers=as_user("alice")))[0] == 404
         assert app.limiter.rejections["rate_limited"] == 3
+        # Let the admitted submissions finish before the store closes under them.
+        await asyncio.gather(*host.kernel.tasks.values(), return_exceptions=True)
         host.close()
     asyncio.run(exercise())
 
