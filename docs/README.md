@@ -25,8 +25,9 @@ must do to keep it true.
 | | |
 | --- | --- |
 | [Operations](operations.md) | Install, serve, register executors, upgrade, back up, recover. |
+| [Host](host.md) | The Modulo/Noesis deployment host: client auth, mutual TLS, context, publication triggers. |
 | [Metrics](metrics.md) | The stable metric catalog: names, units, kinds, label allowlists. |
-| [Qualification](qualification.md) | v1.0.0 release evidence, the reproducible gate, deployment limits. |
+| [Qualification](qualification.md) | v1.1.0 release evidence, the reproducible gate, deployment limits. |
 
 ## Security
 

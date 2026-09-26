@@ -1,13 +1,13 @@
-# v1.0.0 release qualification
+# v1.1.0 release qualification
 
-Qualified on 2026-09-09. Package 1.0.0 uses v1 wire contracts and SQLite layout 2. The reproducible gate builds an sdist, builds its wheel, installs that wheel into a fresh virtual environment with locked test dependencies, verifies imports come from that installation and that typing metadata ships, then runs the full suite, lint, type checks, examples and CLI. Run from a clean checkout with Python 3.11–3.14, uv and working Linux/Bubblewrap isolation:
+Qualified on 2026-09-26. Package 1.1.0 uses v1 wire contracts and SQLite layout 2. The reproducible gate builds an sdist, builds its wheel, installs that wheel into a fresh virtual environment with locked test dependencies, verifies imports come from that installation and that typing metadata ships, then runs the full suite, lint, type checks, examples and CLI. Run from a clean checkout with Python 3.11–3.14, uv and working Linux/Bubblewrap isolation:
 
 ```sh
 uv sync --locked
 uv run python scripts/qualify.py
 ```
 
-Local qualification: 371 tests passed, Ruff passed, mypy passed across 96 source files, all six example checks passed, CLI reported praxis 1.0.0. CI runs source tests/examples on Python 3.11, 3.12, 3.13 and 3.14, plus fresh-wheel qualification on 3.12. These checks are the merge gate, not an assertion of live provider certification.
+Local qualification: 415 tests passed, Ruff passed, mypy passed across 103 source files, all six example checks passed, CLI reported praxis 1.1.0. CI runs source tests/examples on Python 3.11, 3.12, 3.13 and 3.14, plus fresh-wheel qualification on 3.12. These checks are the merge gate, not an assertion of live provider certification.
 
 ## Release checklist
 
@@ -36,12 +36,15 @@ A failure at any automated step blocks the release; do not qualify a modified ch
 | Adapters | all_executors conformance; real local/shell processes; Codex/Claude/DeepSeek offline protocol fixtures |
 | Remote execution | actual worker/controller RPC and native workload tests, reconnect/cancellation/placement/fencing, adversarial lineage fixtures |
 | API/client | authenticated API, SSE resume, controls, client-ASGI integration and real local HTTP/SSE wire tests |
+| Deployment host | client token authentication, delegated identities and process-tree ownership, TLS and mutual TLS, Noesis context domain allowlist, admission limits and deadlines, SIGHUP reload of tokens and certificates, manual and journal-driven publication |
 | Security | native host/sibling/symlink/network isolation, authority mutation/escalation, secret/redaction canaries, 2,000 seeded parser mutations |
 | Compatibility | nine-boundary reader/writer matrix, historical optional fields, negotiated workers, transactional layout 1-to-2 rollback |
 
 Failed execution or rejected verification cannot create a successful verified result. Canonical publication additionally requires a matching immutable snapshot, current baseline, authority, and a current remote generation. Tests reject stale snapshots, failed/unverified candidates, changed policy requests and unsafe replays. An ordinary completed process without a canonical target is not represented as a committed artifact: only workspace.committed records prove that action.
 
-Qualification tightened three operational boundaries: zero budget prevents launch; wall-limited work requires advertised cancellation; native/Codex output is bounded before result accumulation. Workspace bundle restoration now applies directory permissions after writing children. These regressions run in the full gate.
+Version 1.1.0 adds the deployment host and a pre-launch check that fails local work with `executable_not_in_sandbox` when `argv[0]` resolves outside the sandbox mounts. Wire contracts and the SQLite layout are unchanged.
+
+The 1.0.0 qualification tightened three operational boundaries: zero budget prevents launch; wall-limited work requires advertised cancellation; native/Codex output is bounded before result accumulation. Workspace bundle restoration now applies directory permissions after writing children. These regressions run in the full gate.
 
 ## Known deployment limits
 
@@ -51,6 +54,6 @@ Qualification tightened three operational boundaries: zero budget prevents launc
 - CanonicalDirectory is a managed version store, not a general Git transaction manager. Staged candidate transaction objects are not reconstructed after restart. Graph readiness and distributed API scheduling require host orchestration.
 - Uncertain non-replayable effects, unfenced remote work, committed canonical revisions and in-progress knowledge publication require reconciliation; no timeout alone authorizes replay. See the recovery runbook.
 - Secrets granted to a workload can be deliberately encoded or written into artifacts; redaction does not substitute for least privilege and network/publication policy. The internal journal/backups contain privileged process/capability data. Configure operator capabilities before attaching the kernel journal; runtime capability events require process lineage.
-- There is no built-in multi-tenant ownership policy, storage retention daemon, distributed consensus, remote attestation, or production ASGI server dependency. The sample HTTP server uses one operator and a fake executor.
+- There is no storage retention daemon, distributed consensus or remote attestation, and the core package still takes no ASGI server dependency. The optional `praxis.host` provides per-client ownership, delegated identities, TLS and in-memory admission limits for one controller; it does not provide distributed rate limiting or multi-controller placement, and removing a trusted client CA needs a restart ([host](host.md)). The sample HTTP server uses one operator and a fake executor.
 
 No failing automated qualification gate remains in the tested configuration. Preserve this report with the release commit and CI checks. Deployment limits must be addressed by the hosting application before enabling the affected production integrations.

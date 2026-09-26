@@ -12,7 +12,7 @@ Praxis is a library and an ASGI service, not an application. Modulo owns the
 human-facing UX; Noesis owns knowledge. Model-specific integrations live in executor
 adapters, never in the kernel.
 
-- **Status:** v1.0.0 — v1 wire contracts, SQLite layout 2. See the
+- **Status:** v1.1.0 — v1 wire contracts, SQLite layout 2. See the
   [qualification report](docs/qualification.md) for coverage and deployment limits.
 - **Requires:** Python 3.11–3.14. Local sandboxed execution requires Linux and
   [Bubblewrap](https://github.com/containers/bubblewrap).
@@ -170,6 +170,16 @@ The sample server is deliberately one operator and a fake executor. Put TLS, rat
 limits, deadlines and a real authorization rule in front of it before exposure —
 [operations](docs/operations.md) and [API](docs/api.md) describe what a host owes.
 
+For a real deployment alongside Modulo and Noesis, `praxis.host` supplies that host:
+role-scoped client tokens with per-user delegation, mutual TLS in both directions,
+Noesis context and a manual or event-driven publication trigger — see [host](docs/host.md).
+
+```sh
+python -m praxis.host token --client modulo       # client digest for host.toml (start from examples/host.toml)
+python -m praxis.host check --config host.toml
+uv run --with uvicorn python -m praxis.host serve --config host.toml
+```
+
 ## Documentation
 
 Indexed in [docs/](docs/README.md).
@@ -182,13 +192,14 @@ Indexed in [docs/](docs/README.md).
 | [Control-plane API](docs/api.md) | HTTP routes, status codes, SSE cursors |
 | [Client SDK](docs/client.md) | Typed submit/inspect/control/stream flows |
 | [Operations](docs/operations.md) | Install, serve, upgrade, back up, recover |
+| [Host](docs/host.md) | Serving Praxis for Modulo and Noesis: auth, TLS, publication |
 | [Threat model](docs/threat-model.md) | TM-1..TM-9 trust boundaries and what is excluded |
 | [Isolation](docs/isolation.md) | Sandbox construction, mounts, output limits |
 | [Secrets](docs/secrets.md) | Provider integration and injection boundaries |
 | [Redaction](docs/redaction.md) | What is scrubbed before bytes leave the controller |
 | [Metrics](docs/metrics.md) | Stable metric names, units, label allowlists |
 | [Versions](docs/versions.md) | Wire/storage version matrix, compatibility policy |
-| [Qualification](docs/qualification.md) | v1.0.0 release evidence and deployment limits |
+| [Qualification](docs/qualification.md) | v1.1.0 release evidence and deployment limits |
 
 Start with [concepts](docs/concepts.md); read the [threat model](docs/threat-model.md)
 and [isolation](docs/isolation.md) before hosting native workloads.
@@ -196,7 +207,7 @@ and [isolation](docs/isolation.md) before hosting native workloads.
 ## Development
 
 ```sh
-uv run pytest          # 371 tests
+uv run pytest          # 415 tests
 uv run ruff check .
 uv run mypy            # strict, over src/
 ```
@@ -227,10 +238,11 @@ src/praxis/
   remote/          worker registration, dispatch, placement, heartbeats, recovery
   knowledge/       context providers, Noesis integration, publication policy
   observability/   metrics, tracing, redaction, structured errors, health
+  host/            Modulo/Noesis deployment host: config, auth, TLS serving, publication
   compatibility.py version matrix and negotiation
   cli.py           console entry point
 docs/              reference documentation
-examples/          offline demo and sample API server
+examples/          offline demo, sample API server, host configuration
 scripts/           release qualification gate
 tests/             suites outside the package, run against the installed distribution
 ```

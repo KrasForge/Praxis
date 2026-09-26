@@ -1,6 +1,7 @@
 """Direct argv execution in an explicitly granted local workspace."""
 
 import asyncio
+import logging
 import math
 import os
 import signal
@@ -16,6 +17,8 @@ from praxis.executors.outcomes import Outcome, OutcomeStatus
 from praxis.executors.protocol import ControlResult, ExecutionRequest
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.protocol import WorkspaceError, WorkspaceHandle
+
+logger = logging.getLogger("praxis.executors.local")
 
 
 class LocalProcessExecutor(FakeExecutor):
@@ -73,6 +76,12 @@ class LocalProcessExecutor(FakeExecutor):
                 if not (Path(argv[0]).is_file() if "/" in argv[0] else shutil.which(argv[0])):
                     return ControlResult(True, False, "executor_unavailable")
                 if self.isolation is not None:
+                    reachable, where = self.isolation.executable_path(argv[0])
+                    if reachable is None:
+                        # Fail before launch with a stable reason; the path is diagnostic, not API.
+                        logger.warning("%s is not reachable in the sandbox: %s is outside the runtime mounts",
+                                       argv[0], where)
+                        return ControlResult(True, False, "executable_not_in_sandbox")
                     argv = self.isolation.command(argv, path)
                 environment = dict(request.spec.environment)
                 if self.secrets is not None:

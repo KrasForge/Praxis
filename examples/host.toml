@@ -1,0 +1,50 @@
+# Praxis host for Modulo and Noesis — see docs/host.md.
+# Validate with: python -m praxis.host check --config examples/host.toml
+# Secrets never live here: client tokens are SHA-256 digests, the Noesis key is referenced.
+
+data_dir = "/var/lib/praxis"
+executors = ["local"]
+
+[server]
+host = "0.0.0.0"
+port = 8443
+tls_certfile = "/etc/praxis/tls/praxis.pem"
+tls_keyfile = "/etc/praxis/tls/praxis.key"
+# Require client certificates signed by the internal CA (mutual TLS).
+tls_client_ca = "/etc/praxis/tls/internal-ca.pem"
+
+# Modulo's backend: acts for its signed-in users via X-Praxis-On-Behalf-Of.
+# Generate with: python -m praxis.host token --client modulo
+# To rotate, list both digests, SIGHUP, switch the client, drop the old one, SIGHUP.
+[[clients]]
+id = "modulo"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+roles = ["submit", "read", "control", "approve", "publish"]
+delegate = true
+
+# Operators: health, and every process regardless of owner.
+[[clients]]
+id = "ops"
+token_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+roles = ["admin"]
+
+[noesis]
+base_url = "https://noesis.internal:8443"
+# A Noesis API key (nn_...), sent as a bearer credential.
+token_env = "PRAXIS_NOESIS_TOKEN"
+ca_file = "/etc/praxis/tls/internal-ca.pem"
+client_certfile = "/etc/praxis/tls/praxis.pem"
+client_keyfile = "/etc/praxis/tls/praxis.key"
+ingest_path = "/documents/ingest"
+# off | manual (POST /v1/processes/{id}/publication) | auto (opt-in per submission)
+publication = "manual"
+# Domains tasks may read context from; others fail without contacting Noesis.
+context_domains = ["support"]
+
+# Per acting identity (<client> or <client>/<user>) unless named per client.
+[limits]
+requests_per_minute = 120
+client_requests_per_minute = 1200
+submit_per_minute = 20
+max_streams = 4
+request_timeout_seconds = 30
