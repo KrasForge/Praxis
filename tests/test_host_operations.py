@@ -293,9 +293,14 @@ def openssl(*args, cwd):
 
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl CLI required to mint test certificates")
 def test_server_certificate_reloads_into_live_context(tmp_path):
+    # Python 3.13+ verifies with VERIFY_X509_STRICT, so mint conformant CA and leaf extensions.
     openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=ca",
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
             "-keyout", "ca.key", "-out", "ca.pem", cwd=tmp_path)
-    (tmp_path / "san.cnf").write_text("subjectAltName=IP:127.0.0.1\n")
+    (tmp_path / "san.cnf").write_text("basicConstraints=critical,CA:FALSE\n"
+                                      "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                                      "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\n"
+                                      "authorityKeyIdentifier=keyid\nsubjectAltName=IP:127.0.0.1\n")
     for name in ("old", "new"):
         openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", f"/CN={name}", "-keyout", f"{name}.key",
                 "-out", f"{name}.csr", cwd=tmp_path)

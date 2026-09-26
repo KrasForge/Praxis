@@ -267,17 +267,23 @@ def openssl(*args, cwd):
     subprocess.run(["openssl", *args], cwd=cwd, check=True, capture_output=True)
 
 
+LEAF_EXTENSIONS = ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+                   "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
+
+
 @pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl CLI required to mint test certificates")
 def test_transport_mutual_tls(tmp_path):
-    san = tmp_path / "san.cnf"
-    san.write_text("subjectAltName=IP:127.0.0.1\n")
+    # Python 3.13+ verifies with VERIFY_X509_STRICT, so mint conformant CA and leaf extensions.
+    (tmp_path / "server.cnf").write_text(LEAF_EXTENSIONS + "extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n")
+    (tmp_path / "client.cnf").write_text(LEAF_EXTENSIONS + "extendedKeyUsage=clientAuth\n")
     openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=test-ca",
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
             "-keyout", "ca.key", "-out", "ca.pem", cwd=tmp_path)
-    for name, extra in (("server", ["-extfile", "san.cnf"]), ("client", [])):
+    for name in ("server", "client"):
         openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", f"/CN={name}", "-keyout", f"{name}.key",
                 "-out", f"{name}.csr", cwd=tmp_path)
         openssl("x509", "-req", "-in", f"{name}.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
-                "-days", "1", "-out", f"{name}.pem", *extra, cwd=tmp_path)
+                "-days", "1", "-out", f"{name}.pem", "-extfile", f"{name}.cnf", cwd=tmp_path)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
