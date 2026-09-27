@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
+from typing import Protocol
 
 from praxis.knowledge.context import ContextProvider, ContextResponse, bound_response
 from praxis.knowledge.dependencies import ContextDependency, RequiredContextUnavailable
@@ -19,6 +20,7 @@ from praxis.kernel.authority import Authority, AuthorizationError
 from praxis.kernel.capabilities import Capability, Resource
 from praxis.kernel.contracts import Contract
 from praxis.kernel.effects import Effect
+from praxis.kernel.proposals import ProposalError, proposals_from_files
 from praxis.kernel.results import ProcessResult
 from praxis.compatibility import negotiate
 from praxis.kernel.events import Event
@@ -51,6 +53,16 @@ class CancellationPolicy(str, Enum):
     TREE = "tree"
 
 
+class ProposalSink(Protocol):
+    """Receives the effects a completed, verified process proposed (ADR 0001).
+
+    Called again for the same effects after a restart, so it must be idempotent; the
+    effects carry deterministic idempotency keys for that purpose.
+    """
+
+    def propose(self, process_id: str, effects: tuple[Effect, ...]) -> None: ...
+
+
 @dataclass(frozen=True)
 class ChildOutcome:
     process_id: str
@@ -64,6 +76,7 @@ class Kernel:
         executors: dict[str, Executor], *, retain_workspaces: bool = False,
         authority: Authority | None = None, validators: dict[str, Validator] | None = None,
         context_providers: dict[str, ContextProvider] | None = None,
+        proposal_sink: ProposalSink | None = None,
     ):
         negotiate("workspace", [workspaces.protocol_version])
         for executor in executors.values():
@@ -82,6 +95,9 @@ class Kernel:
         # Staged transactions recovery refused to rebuild, by reason. They can never commit.
         self.abandoned_transactions: dict[str, str] = {}
         self.retain_workspaces = retain_workspaces
+        self.proposal_sink = proposal_sink
+        # Effects proposed by a verified snapshot, held until the process completes.
+        self.proposed: dict[str, tuple[Effect, ...] | ProposalError] = {}
         self.processes: dict[str, Process] = {}
         self.tasks: dict[str, asyncio.Task[Outcome]] = {}
         self.results: dict[str, Outcome] = {}
@@ -248,6 +264,7 @@ class Kernel:
             self._move(process, result.process_state(verified=verified))
         self.events.append(Event(process.process_id, "process.result", {"result": self.result(process.process_id).to_json()},
                                  parent_id=process.parent_id))
+        self._release_proposals(process)
         if handle is not None:
             if self.authority.authorize(process.process_id, Resource.WORKSPACE,
                                         "destroy", process.process_id).allowed:
@@ -368,6 +385,17 @@ class Kernel:
             self.events.append(Event(process.process_id, "contract.checked", payload, parent_id=process.parent_id))
         report = evaluate(contract, source, tuple(results))
         self.verification[process.process_id] = report
+        self.proposed.pop(process.process_id, None)
+        if report.approved:
+            try:
+                contents = dict(files)
+                self.proposed[process.process_id] = tuple(
+                    proposal.to_effect(process.process_id, process.attempt_id, snapshot.snapshot_id, contents)
+                    for proposal in proposals_from_files(source.files))
+            except ProposalError as exc:
+                self.proposed[process.process_id] = exc
+            except ValueError:
+                self.proposed[process.process_id] = ProposalError(".praxis/effects/", "invalid_effect")
         self.events.append(Event(process.process_id, "contract.evaluated", {
             "approved": report.approved, "snapshot_id": report.snapshot_id,
             "missing_outputs": list(report.missing_outputs),
@@ -375,6 +403,46 @@ class Kernel:
             "advisory_failures": list(report.advisory_failures),
         }, parent_id=process.parent_id))
         return report
+
+    def _release_proposals(self, process: Process) -> None:
+        """Journal and hand over proposals, only for work that completed verified."""
+        proposed = self.proposed.pop(process.process_id, None)
+        if proposed is None or process.state != State.COMPLETED:
+            return
+        report = self.verification.get(process.process_id)
+        snapshot_id = None if report is None else report.snapshot_id
+        if isinstance(proposed, ProposalError):
+            # All or nothing: one invalid proposal stages none of them.
+            self.events.append(Event(process.process_id, "effects.proposals_rejected", {
+                "attempt_id": process.attempt_id, "snapshot_id": snapshot_id,
+                "path": proposed.path, "reason": proposed.reason,
+            }, parent_id=process.parent_id))
+            return
+        if not proposed:
+            return
+        self.events.append(Event(process.process_id, "effects.proposed", {
+            "attempt_id": process.attempt_id, "snapshot_id": snapshot_id,
+            "effects": [effect.to_json() for effect in proposed],
+        }, parent_id=process.parent_id))
+        if self.proposal_sink is not None:
+            try:
+                self.proposal_sink.propose(process.process_id, proposed)
+            except Exception:
+                # The journaled proposals are staged again on the next recovery.
+                self.events.append(Event(process.process_id, "effects.staging_failed", {
+                    "attempt_id": process.attempt_id}, parent_id=process.parent_id))
+
+    def proposals(self) -> tuple[tuple[str, tuple[Effect, ...]], ...]:
+        """Journaled proposals of processes still completed on their proposing attempt."""
+        found: dict[str, tuple[Effect, ...]] = {}
+        for event in self.events:
+            if event.type != "effects.proposed":
+                continue
+            process = self.processes.get(event.process_id)
+            if process is None or process.state != State.COMPLETED or event.payload.get("attempt_id") != process.attempt_id:
+                continue
+            found[event.process_id] = tuple(Effect.from_json(raw) for raw in event.payload["effects"])
+        return tuple(found.items())
 
     def _persist(self, process: Process, event: Event) -> None:
         if isinstance(self.records, ProcessStore):

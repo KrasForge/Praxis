@@ -59,7 +59,9 @@ publication of the winner only.
 
 SQLite stores the processes, the event cursors, the checkpoints and the records
 of each subsystem, and it does so atomically. A kernel is a single owner of the
-controller. The map of tasks in memory is not a distributed lock.
+controller ([ADR 0004](adr/0004-single-controller-ownership.md)). The map of
+tasks in memory is not a distributed lock; the host holds an exclusive lock on its
+data directory instead, so a second controller fails closed.
 
 A worker registers its identity and its generation, advertises its capabilities
 and renews a heartbeat lease. DistributedScheduler reserves the capacity and

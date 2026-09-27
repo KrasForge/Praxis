@@ -40,7 +40,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config.noesis is not None:
         files += [config.noesis.token_file, config.noesis.ca_file, config.noesis.client_certfile,
                   config.noesis.client_keyfile]
+    for entry in config.effects:
+        files += [entry.token_file, entry.ca_file, entry.client_certfile, entry.client_keyfile]
     missing = [name for name in dict.fromkeys(files) if name is not None and not Path(name).is_file()]
+    missing += [path for entry in config.effects for _, path in entry.repositories if not Path(path).is_dir()]
     if missing:
         print("missing files: " + ", ".join(missing), file=sys.stderr)
         return 2
@@ -55,11 +58,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not (root / "runtime.db").is_file():
             print(f"no runtime database under {root}", file=sys.stderr)
             return 2
+        from praxis.host.app import ControllerLocked, acquire_controller, release_controller
+        try:
+            # Applying removes files; only a stopped controller may do that (ADR 0004).
+            lock = acquire_controller(root) if args.apply else None
+        except ControllerLocked as exc:
+            print(f"{exc}; stop it before --apply", file=sys.stderr)
+            return 2
         store = SQLiteStore(root / "runtime.db")
         try:
             report = retention_sweep(config, store, LocalWorkspaces(root / "workspaces"), apply=args.apply)
         finally:
             store.close()
+            release_controller(lock)
         print(report.to_json())
         return 0
     if args.command == "check":
@@ -68,7 +79,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         publication = "disabled" if config.noesis is None else config.noesis.publication
         domains = ("" if config.noesis is None or config.noesis.context_domains is None
                    else f", context domains {', '.join(sorted(config.noesis.context_domains))}")
-        print(f"ok: {len(config.clients)} client(s), {tls}, Noesis publication {publication}{domains}")
+        effects = (f", {len(config.effect_policy)} effect rule(s), adapters for "
+                   f"{', '.join(e.kind for e in config.effects) or 'no kinds'}")
+        from praxis.host.app import controller_running
+        running = controller_running(Path(config.data_dir).resolve())
+        print(f"ok: {len(config.clients)} client(s), {tls}, Noesis publication {publication}{domains}{effects}, "
+              f"controller {'running' if running else 'not running'}")
         return 0
     try:
         uvicorn = importlib.import_module("uvicorn")
@@ -84,7 +100,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     praxis_logger.addHandler(handler)
     praxis_logger.setLevel(logging.INFO)
     praxis_logger.propagate = False
-    host = build_host(config, config_path=args.config)
+    from praxis.host.app import ControllerLocked
+    try:
+        host = build_host(config, config_path=args.config)
+    except ControllerLocked as exc:
+        print(exc, file=sys.stderr)
+        return 2
     server = config.server
     settings = uvicorn.Config(host.app, host=server.host, port=server.port, lifespan="on", server_header=False,
                               proxy_headers=server.tls_terminated_upstream,
@@ -92,10 +113,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                               ssl_ca_certs=server.tls_client_ca,
                               ssl_cert_reqs=ssl.CERT_REQUIRED if server.tls_client_ca else ssl.CERT_NONE)
     settings.load()
-    # SIGHUP reloads certificates into this live context for new handshakes.
+    # SIGHUP builds a fresh context from the current files; new handshakes switch to it,
+    # and open connections from a client CA that was removed are closed.
     host.server_ssl = settings.ssl
+    server_instance = uvicorn.Server(settings)
+    host.connections = lambda: [getattr(c, "transport") for c in server_instance.server_state.connections
+                                if getattr(c, "transport", None) is not None]
     try:
-        uvicorn.Server(settings).run()
+        server_instance.run()
     finally:
         host.close()
     return 0

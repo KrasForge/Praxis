@@ -17,6 +17,9 @@ purpose.
 | POST /v1/processes/{id}/control | Give an operation and the current attempt_id: cancel, suspend, resume, signal or retry |
 | GET/POST /v1/processes/{id}/approvals | Read the pending effects, or give a decision that is bound to an attempt and a version |
 | POST /v1/processes/{id}/interventions | Give an audited instruction or signal intervention that has a type |
+| POST /v1/processes/{id}/plan/materialize | Turn the verified plan of a completed planning process into processes and a graph, once |
+| POST /v1/processes/{id}/effects/{effect_id}/apply | Apply an approved effect. The body has `attempt_id` and `version` |
+| POST /v1/processes/{id}/effects/{effect_id}/reconcile | Resolve an uncertain effect through its adapter lookup. The body has `attempt_id` |
 | GET /v1/health | Read a snapshot of the queue, executors, workers, blocks and budget pressure |
 
 A submission returns 202, or 200 for a duplicate. Validation returns 422. A
@@ -36,6 +39,13 @@ boolean) and `reason`. The validation of the service controls the decisions that
 it accepts. No API credential gives executor authority or effect authority
 automatically. The internal methods of ControlPlane are trusted APIs for a host,
 and they go around the security hooks of HTTP.
+
+An apply or reconcile response contains the effect and the receipt: `applied`,
+`reason` and `external_id`. It returns 200 when the effect reached `applied` or
+`failed`. It returns 409 for a stale version or attempt and for
+`application_uncertain`, and 503 when no adapter or lookup serves the kind. Praxis
+never applies an uncertain effect again: reconcile it instead. See
+[ADR 0001](adr/0001-effect-adapters.md).
 
 Modulo should use the [typed client](client.md) for these contracts. It should
 also do all of these:

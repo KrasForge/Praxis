@@ -35,6 +35,17 @@ and retry (with the fields of a retry policy). A stale attempt returns
 that fact stays explicit in the control data. No operation retries a mutation
 silently.
 
+Use `client.apply_effect(pid, attempt_id, effect_id, version)` to apply an
+approved effect, and `client.reconcile_effect(pid, attempt_id, effect_id)` to
+resolve an uncertain one. Both return an `EffectApplication` with the effect and
+its receipt. An uncertain application raises `ClientAPIError(409,
+"application_uncertain")`; reconcile it, and never apply it again.
+
+Use `client.materialize_plan(pid)` to turn the verified plan of a completed
+planning process into processes and a graph. It returns the node process IDs by
+key, the graph ID and the grants issued or refused. A second call returns the
+first result with `duplicate` set.
+
 `TransportError` reports a failure of the network or of the wire format.
 `ClientAPIError` reports a rejection by HTTP or by the API. A process that failed
 is ordinary result data: it has a state, an outcome, a verification and a

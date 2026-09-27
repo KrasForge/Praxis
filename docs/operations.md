@@ -50,6 +50,16 @@ provider before you go to production.
 [Host](host.md) puts this wiring, the client authentication, TLS and the
 publication trigger behind one configuration file.
 
+## One controller per store
+
+A host takes an exclusive `flock` on `<data_dir>/controller.lock` at startup and
+holds it until it stops. A second host on the same directory refuses to start.
+The operating system releases the lock when the process dies, so a crash never
+blocks a restart. `python -m praxis.host check` reports whether a controller holds
+the directory, and `retention --apply` refuses to run while one does. The lock
+file holds no data: leave it out of backups and restores. See
+[ADR 0004](adr/0004-single-controller-ownership.md).
+
 ## Upgrade and backup
 
 1. Stop new submissions and mutations. Drain the tasks, or terminate them
@@ -92,8 +102,10 @@ For a remote assignment, use the detection of OrphanRecovery and its positive
 identity of the process, but they allocate a new attempt ID. A heartbeat that
 timed out is not confirmation that the work stopped.
 
-Inspect the effects that are applying or uncertain. Reconcile them with their
-idempotency receipts before a retry. Never repeat a non-replayable effect
+Inspect the effects that are applying or uncertain. The host reports each one
+as `effect_uncertain` in `GET /v1/health`. Reconcile them with their
+idempotency receipts before a retry, through
+`POST /v1/processes/{id}/effects/{effect_id}/reconcile`. Never repeat a non-replayable effect
 blindly. Inspect the `workspace.committed` receipts and the history of the
 canonical pointer. After a canonical commit, Praxis blocks a replay. Attach the
 canonical targets and the scheduler policy of the host deliberately.

@@ -6,12 +6,13 @@ trigger, and client authentication. ``create_app`` is the ASGI factory for serve
 """
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import signal
 import ssl
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,10 +25,17 @@ from praxis.executors.local import LocalProcessExecutor
 from praxis.executors.protocol import Executor
 from praxis.host.auth import HostSecurity
 from praxis.host.config import HostConfig, HostConfigError, NoesisConfig, load_host_config
+from praxis.host.effects import HostEffects, build_adapters
 from praxis.host.limits import Limiter, Rejection
 from praxis.host.publisher import TARGET, Publisher, PublicationWorker, result_payload
 from praxis.kernel.authority import Authority
-from praxis.kernel.effect_service import EffectService
+from praxis.effects import require_reconcilable
+from praxis.kernel.effect_service import EffectAdapter, EffectService
+from praxis.kernel.capabilities import Resource
+from praxis.kernel.effects import Effect, EffectKind
+from praxis.kernel.planning import PlanMaterializer, PlanningError
+from praxis.storage.graphs import GraphStore
+from praxis.validators.plan import AllowedGrant, PlanValidator
 from praxis.kernel.lifecycle import TERMINAL
 from praxis.kernel.runtime import Kernel
 from praxis.knowledge.context import ContextProvider, ContextRequest, ContextResponse
@@ -49,10 +57,42 @@ class HostControlPlane(ControlPlane):
     """Submission also records publication intent for clients allowed to publish."""
 
     def __init__(self, kernel: Kernel, effects: EffectService, config: HostConfig,
-                 publisher: Publisher | None):
+                 publisher: Publisher | None, policy: HostEffects | None = None,
+                 planning: PlanMaterializer | None = None, owner: Callable[[str], str | None] | None = None):
         super().__init__(kernel, effects)
         self.config = config
         self.publisher = publisher
+        self.policy = policy
+        self.planning = planning
+        self.owner = owner
+
+    async def materialize_plan(self, process_id: str, actor: str) -> dict[str, Any]:
+        self.inspect(process_id)
+        if self.planning is None:
+            raise APIError(404, "route_not_found")
+        try:
+            async with self.operation_locks.setdefault(process_id, asyncio.Lock()):
+                owner = None if self.owner is None else self.owner(process_id)
+                result = self.planning.materialize(process_id, actor, owner)
+                started = await self.planning.advance(process_id)
+        except PlanningError as exc:
+            raise APIError(exc.status, exc.code) from None
+        return {"process_id": process_id, **result, "started": started}
+
+    def approval_expiry(self, effect: Effect) -> str | None:
+        return None if self.policy is None else self.policy.expires_at(effect)
+
+    def may_see(self, actor: str | None, effect: Effect) -> bool:
+        """The owner's side sees every pending effect; an approver only those they decide."""
+        owner = None if self.owner is None else self.owner(effect.process_id)
+        if actor is None or owner is None:
+            return True
+        client = self.config.client(actor.split("/", 1)[0])
+        if client is not None and "admin" in client.roles:
+            return True
+        if actor == owner or ("/" not in actor and owner.startswith(actor + "/")):
+            return True  # the submitter, or their client acting as itself
+        return self.policy is not None and self.policy.may_decide(actor, effect)
 
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *,
                actor: str = "kernel") -> dict[str, Any]:
@@ -107,6 +147,7 @@ class HostApplication:
         self.worker_task: asyncio.Task[None] | None = None
         self.reloader: Callable[[], None] | None = None
         self.retention: Callable[[], object] | None = None  # one applied sweep
+        self.recovery: list[Callable[[], Awaitable[None]]] = []  # continued once the loop runs
         self.retention_interval: float | None = None
         self.retention_task: asyncio.Task[None] | None = None
         self.background: set[asyncio.Task[None]] = set()
@@ -204,6 +245,11 @@ class HostApplication:
         while True:
             message = await receive()
             if message["type"] == "lifespan.startup":
+                for recover in self.recovery:
+                    try:
+                        await recover()
+                    except Exception:
+                        logger.exception("startup recovery step failed")
                 if self.worker is not None:
                     self.worker_task = asyncio.create_task(self.worker.run())
                 if self.retention is not None and self.retention_interval is not None:
@@ -274,7 +320,7 @@ def restart_key(config: HostConfig) -> tuple[Any, ...]:
     noesis = config.noesis
     return (config.data_dir, config.executors, config.server.host, config.server.port, config.server.tls,
             config.server.tls_client_ca is not None, config.server.tls_terminated_upstream, config.limits,
-            config.retention,
+            config.retention, config.effects,
             None if noesis is None else (noesis.base_url, noesis.ingest_path, noesis.publication))
 
 
@@ -296,9 +342,17 @@ class Host:
     config_path: Path | None = None
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     server_ssl: ssl.SSLContext | None = None
+    # New handshakes switch to this context, built from the current configuration.
+    current_ssl: ssl.SSLContext | None = None
+    # Open server transports, so a reload can close clients of a CA that was removed.
+    connections: Callable[[], Iterable[asyncio.BaseTransport]] | None = None
+    lock: Any = None
+    live: dict[str, HostConfig] = field(default_factory=dict)
 
     def close(self) -> None:
         self.store.close()
+        release_controller(self.lock)
+        self.lock = None
 
     def sweep(self, *, apply: bool) -> RetentionReport:
         """Run retention against this host's data with its live journal."""
@@ -317,40 +371,116 @@ class Host:
                 raise HostConfigError("reload", "host was not started from a config file")
             config = load_host_config(self.config_path)
         if restart_key(config) != restart_key(self.config):
-            raise HostConfigError("reload", "data_dir, executors, bind, TLS mode, limits and Noesis "
-                                  "origin/publication changes require a restart")
+            raise HostConfigError("reload", "data_dir, executors, bind, TLS mode, limits, retention, effect "
+                                  "adapters and Noesis origin/publication changes require a restart")
         changes = []
         transport, token = None, None
         if config.noesis is not None and self.noesis_transport is not None and self.rebuild_noesis:
             token = noesis_token(config.noesis, self.environ)
             transport = noesis_http_transport(config.noesis, token)
+        fresh = None
         if self.server_ssl is not None and config.server.tls_certfile is not None:
-            # The live context serves new handshakes with the new certificate. Trusted client
-            # CAs can be added this way but not removed; dropping a CA requires a restart.
+            fresh = server_ssl_context(config)  # built first: a bad file changes nothing
+        if self.server_ssl is not None and fresh is not None and config.server.tls_certfile is not None:
+            # A context cannot forget a CA, so every new handshake switches to a fresh one.
             self.server_ssl.load_cert_chain(config.server.tls_certfile, config.server.tls_keyfile)
-            if config.server.tls_client_ca is not None:
-                self.server_ssl.load_verify_locations(cafile=config.server.tls_client_ca)
+            self.current_ssl = fresh
+            self.server_ssl.sni_callback = self._select_context
             changes.append("server certificate")
+            if config.server.tls_client_ca is not None and self.connections is not None:
+                closed = close_untrusted(self.connections(), fresh)
+                if closed:
+                    changes.append(f"closed {closed} connection(s) from removed client CAs")
         if transport is not None and token is not None and self.noesis_transport is not None:
             self.redaction.register(token)
             self.noesis_transport.current = transport
             changes.append("noesis credentials")
         if config.clients != self.config.clients:
             changes.append("clients")
+        if config.effect_policy != self.config.effect_policy:
+            changes.append("effect policy")
         new_domains = None if config.noesis is None else config.noesis.context_domains
         scoped = self.context_providers.get("noesis")
         if isinstance(scoped, DomainScopedProvider) and scoped.domains != new_domains:
             scoped.domains = new_domains
             changes.append("context domains")
+        if config.planning != self.config.planning:
+            changes.append("planning allowlist")
         self.security.config = self.control.config = self.config = config
+        self.live["config"] = config
+        if self.control.policy is not None:
+            self.control.policy.config = config
         logger.info("host configuration reloaded: %s", ", ".join(changes) or "no changes")
         return changes
+
+    def _select_context(self, connection: ssl.SSLObject, name: str | None, context: ssl.SSLContext) -> None:
+        if self.current_ssl is not None:
+            connection.context = self.current_ssl
 
     def reload_from_signal(self) -> None:
         try:
             self.reload()
         except Exception as exc:
             logger.error("host configuration reload rejected; keeping the running configuration: %s", exc)
+
+
+class ControllerLocked(RuntimeError):
+    code = "controller_locked"
+
+
+def acquire_controller(data_dir: Path) -> Any:
+    """Hold the data directory for this process (ADR 0004). The kernel releases a
+    ``flock`` when the process dies, so a crash never blocks the next start."""
+    handle = (data_dir / "controller.lock").open("a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise ControllerLocked(f"another controller holds {data_dir}; one controller owns one store") from None
+    return handle
+
+
+def release_controller(handle: Any) -> None:
+    if handle is not None and not handle.closed:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def controller_running(data_dir: Path) -> bool:
+    if not (data_dir / "controller.lock").exists():
+        return False
+    try:
+        release_controller(acquire_controller(data_dir))
+    except ControllerLocked:
+        return True
+    return False
+
+
+def server_ssl_context(config: HostConfig) -> ssl.SSLContext:
+    server = config.server
+    assert server.tls_certfile is not None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(server.tls_certfile, server.tls_keyfile)
+    if server.tls_client_ca is not None:
+        context.load_verify_locations(cafile=server.tls_client_ca)
+        context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+def close_untrusted(transports: Iterable[asyncio.BaseTransport], context: ssl.SSLContext) -> int:
+    """Close connections whose client certificate issuer is no longer a trusted CA."""
+    trusted = {tuple(tuple(part) for part in ca["subject"]) for ca in context.get_ca_certs()}
+    closed = 0
+    for transport in list(transports):
+        connection = transport.get_extra_info("ssl_object")
+        peer = None if connection is None else connection.getpeercert()
+        if not peer or "issuer" not in peer:
+            continue
+        if tuple(tuple(part) for part in peer["issuer"]) not in trusted:
+            transport.close()
+            closed += 1
+    return closed
 
 
 def noesis_token(config: NoesisConfig, environ: Mapping[str, str]) -> str:
@@ -394,16 +524,33 @@ def retention_sweep(config: HostConfig, store: SQLiteStore, workspaces: LocalWor
     return report
 
 
+def allowlist(config: HostConfig) -> tuple[AllowedGrant, ...]:
+    return tuple((Resource(entry.resource), entry.actions, entry.scope) for entry in config.planning.grant_allowlist)
+
+
 def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
                executors: Mapping[str, Executor] | None = None,
                noesis_transport: JSONTransport | None = None,
-               config_path: Path | None = None) -> Host:
+               config_path: Path | None = None,
+               effect_adapters: Mapping[EffectKind, EffectAdapter] | None = None) -> Host:
     """Assemble a recovered kernel and its ASGI app. Extra ``executors`` (agent adapters
     inside isolated workers) are registered alongside the configured built-ins. With
-    ``config_path`` the app reloads that file on SIGHUP."""
+    ``config_path`` the app reloads that file on SIGHUP. Extra ``effect_adapters`` join
+    the configured ones under the same rule: an irreversible kind needs a lookup."""
     env = os.environ if environ is None else environ
     root = Path(config.data_dir).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = acquire_controller(root)
+    try:
+        return _build_host(config, root, lock, env, executors, noesis_transport, config_path, effect_adapters)
+    except BaseException:
+        release_controller(lock)
+        raise
+
+
+def _build_host(config: HostConfig, root: Path, lock: Any, env: Mapping[str, str],
+                executors: Mapping[str, Executor] | None, noesis_transport: JSONTransport | None,
+                config_path: Path | None, effect_adapters: Mapping[EffectKind, EffectAdapter] | None) -> Host:
     workspaces = LocalWorkspaces(root / "workspaces")
     registry: dict[str, Executor] = {}
     if "fake" in config.executors:
@@ -427,16 +574,38 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
         else:
             transport = SwappableTransport(noesis_transport)
         providers["noesis"] = DomainScopedProvider(NoesisContextProvider(transport), config.noesis.context_domains)
-    kernel = Kernel(store, workspaces, registry, authority=authority, context_providers=providers)
+    live: dict[str, HostConfig] = {"config": config}  # reload replaces the policy it reads
+    kernel = Kernel(store, workspaces, registry, authority=authority, context_providers=providers,
+                    validators={"plan": PlanValidator(lambda: frozenset(registry),
+                                                      lambda pid: kernel.budgets.limits.get(pid),
+                                                      lambda: allowlist(live["config"]))})
     kernel.recover_records()
+    security = HostSecurity(config, kernel)
+    policy = HostEffects(kernel, config, security.owner)
+    effects = EffectService(store, authority, approvers=policy)
+    policy.service = effects
+    adapters = build_adapters(config, kernel, lambda: effects, env, redaction)
+    for kind, adapter in (effect_adapters or {}).items():
+        if kind in adapters:
+            raise ValueError(f"effect adapter for {kind.value} is already configured")
+        adapters[kind] = adapter
+    require_reconcilable(adapters)
+    effects.adapters = adapters
+    kernel.proposal_sink = policy
+    for process_id, proposed in kernel.proposals():
+        # Idempotent: effects staged before the restart are found by their key.
+        policy.propose(process_id, proposed)
+    for effect in effects.in_flight():
+        logger.warning("effect %s of process %s is uncertain; reconcile it, it is never retried",
+                       effect.effect_id, effect.process_id)
     publisher = worker = None
     if config.noesis is not None and transport is not None and config.noesis.publication != "off":
         exporter = NoesisExporter(transport, config.noesis.ingest_path)
         publisher = Publisher(kernel, store, authority, PublicationService(store, authority, exporter, target=TARGET))
         if config.noesis.publication == "auto":
             worker = PublicationWorker(publisher)
-    security = HostSecurity(config, kernel)
-    control = HostControlPlane(kernel, EffectService(store, authority), config, publisher)
+    planning = PlanMaterializer(kernel, GraphStore(store), lambda: allowlist(live["config"]))
+    control = HostControlPlane(kernel, effects, config, publisher, policy, planning, security.owner)
     limits = config.limits
     limited = any(v is not None for v in (limits.requests_per_minute, limits.client_requests_per_minute,
                                          limits.submit_per_minute, limits.max_streams,
@@ -445,6 +614,9 @@ def build_host(config: HostConfig, *, environ: Mapping[str, str] | None = None,
                           Limiter(limits) if limited else None)
     host = Host(config, store, kernel, authority, security, app, control, redaction, publisher, worker, providers,
                 transport, noesis_transport is None, config_path, env)
+    host.live = live
+    host.lock = lock
+    app.recovery.append(planning.recover)
     if config_path is not None:
         app.reloader = host.reload_from_signal
     if config.retention.enabled and config.retention.interval_hours is not None:

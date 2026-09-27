@@ -55,6 +55,16 @@ class ControlReceipt:
     control: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class EffectApplication:
+    process_id: str
+    attempt_id: str
+    effect: dict[str, Any]
+    applied: bool
+    reason: str
+    external_id: str | None
+
+
 def process_path(identity: str) -> str:
     if not isinstance(identity, str) or not identity or "/" in identity or identity in {".", ".."}:
         raise ValueError("invalid_process_identity")
@@ -104,6 +114,38 @@ class Client:
             if data["process_id"] != process_id or not isinstance(data["attempt_id"], str) or not isinstance(data["control"], dict):
                 raise ValueError()
             return ControlReceipt(process_id, data["attempt_id"], data["control"])
+        except (ValueError, KeyError, TypeError):
+            raise TransportError("invalid_api_response") from None
+
+    async def apply_effect(self, process_id: str, attempt_id: str, effect_id: str, version: int) -> EffectApplication:
+        """Apply an approved effect. An uncertain application is an error, never retried."""
+        return await self._effect(process_id, effect_id, "apply", {"attempt_id": attempt_id, "version": version})
+
+    async def reconcile_effect(self, process_id: str, attempt_id: str, effect_id: str) -> EffectApplication:
+        return await self._effect(process_id, effect_id, "reconcile", {"attempt_id": attempt_id})
+
+    async def _effect(self, process_id: str, effect_id: str, operation: str,
+                      body: dict[str, Any]) -> EffectApplication:
+        data = await self._request("POST", process_path(process_id) + "/effects/"
+                                   + quote(effect_id, safe="") + "/" + operation, body)
+        try:
+            receipt, effect = data["receipt"], data["effect"]
+            if (data["process_id"] != process_id or not isinstance(effect, dict) or effect.get("effect_id") != effect_id
+                    or type(receipt["applied"]) is not bool or not isinstance(receipt["reason"], str)):
+                raise ValueError()
+            return EffectApplication(process_id, data["attempt_id"], effect, receipt["applied"], receipt["reason"],
+                                     receipt.get("external_id"))
+        except (ValueError, KeyError, TypeError):
+            raise TransportError("invalid_api_response") from None
+
+    async def materialize_plan(self, process_id: str) -> dict[str, Any]:
+        """Turn a verified plan into processes and a graph; repeated calls return the first result."""
+        data = await self._request("POST", process_path(process_id) + "/plan/materialize", {})
+        try:
+            if (data["process_id"] != process_id or not isinstance(data["nodes"], dict)
+                    or not isinstance(data["graph_id"], str) or type(data["duplicate"]) is not bool):
+                raise ValueError()
+            return data
         except (ValueError, KeyError, TypeError):
             raise TransportError("invalid_api_response") from None
 

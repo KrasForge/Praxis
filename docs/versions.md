@@ -14,6 +14,8 @@ storage. These numbers are independent.
 | Capability | schema_version | 1 | 1 |
 | Contract | schema_version | 1 | 1 |
 | Effect | schema_version | 1 | 1 |
+| Effect proposal (`praxis.effect-proposal`) | schema_version | 1 | 1 |
+| Plan (`praxis.plan`) | schema_version | 1 | 1 |
 | Worker | registration/dispatch protocol_version | 1 | 1 |
 
 `praxis.compatibility.VERSIONS` is the matrix that a machine can read.

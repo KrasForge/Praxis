@@ -1,5 +1,6 @@
 """Offline examples: uv run python examples/demo.py. No provider calls or publication."""
 import asyncio
+import json
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,12 +13,14 @@ from praxis.executors.local import LocalProcessExecutor
 from praxis.kernel.authority import Authority
 from praxis.kernel.capabilities import Resource
 from praxis.kernel.graph import Dependency, ProcessGraph
+from praxis.kernel.planning import PlanMaterializer
 from praxis.kernel.runtime import Kernel
 from praxis.kernel.spec import ProcessSpec
 from praxis.knowledge.context import ContextRequest
 from praxis.knowledge.noesis import NoesisContextProvider
 from praxis.storage.graphs import GraphStore
 from praxis.storage.sqlite import SQLiteStore
+from praxis.validators.plan import PlanValidator
 from praxis.workspaces.local import LocalWorkspaces
 from praxis.workspaces.transaction import CanonicalDirectory
 
@@ -73,6 +76,33 @@ async def demo(root):
     context = await NoesisContextProvider(NoesisFixture()).query(ContextRequest("evidence", (("domain", "docs"),)))
     assert context.items[0].source_id == "document-1"
     print("Noesis contract fixture: passed")
+
+    # A plan is ordinary verified output: validated, then materialized by a person (ADR 0003).
+    kernel.validators["plan"] = PlanValidator(lambda: kernel.executors, kernel.budgets.limits.get, lambda: ())
+    write = "from pathlib import Path; Path('out').write_text('ok')"
+    step = {"executor": "local", "contract": {"required_outputs": ["out"]},
+            "inputs": {"argv": [sys.executable, "-c", write]}}
+    plan = {"schema": "praxis.plan", "schema_version": 1,
+            "nodes": [{"key": "build", "spec": {"objective": "build", **step}},
+                      {"key": "check", "spec": {"objective": "check", **step}}],
+            "dependencies": [{"prerequisite": "build", "dependent": "check"}]}
+    planner = kernel.create(ProcessSpec("plan the work", "local", inputs={"argv": [sys.executable, "-c",
+        f"from pathlib import Path; Path('plan.json').write_text({json.dumps(plan)!r})"]},
+        contract={"required_outputs": ["plan.json"], "validators": [{"check_id": "plan", "validator": "plan"}]}))
+    kernel.start(planner.process_id)
+    await kernel.tasks[planner.process_id]
+    assert kernel.result(planner.process_id).verification.approved
+    planning = PlanMaterializer(kernel, GraphStore(store), lambda: ())
+    nodes = planning.materialize(planner.process_id, "demo", None)["nodes"]
+    await planning.advance(planner.process_id)
+    await kernel.tasks[nodes["build"]]
+    for _ in range(500):  # the host advances the graph when build finishes
+        if nodes["check"] in kernel.tasks:
+            break
+        await asyncio.sleep(0.01)
+    await kernel.tasks[nodes["check"]]
+    assert all(kernel.processes[node].state.value == "completed" for node in nodes.values())
+    print("verified plan materialized and run: passed")
 
     # Modulo consumes these same inspection/event shapes over the authenticated HTTP API.
     service = ControlPlane(kernel)

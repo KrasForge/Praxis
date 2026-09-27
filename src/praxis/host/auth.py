@@ -21,6 +21,7 @@ PRINCIPAL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
 ACTION_ROLES = {
     "health": "health", "submit": "submit", "inspect": "read", "tree": "read", "events": "read",
     "control": "control", "interventions": "control", "approvals": "approve", "publication": "publish",
+    "effects": "publish", "plan": "approve",
 }
 
 
@@ -74,6 +75,10 @@ class HostSecurity:
         if process_id is None or "admin" in client.roles:
             return True
         owner = self.owner(process_id)
+        if action == "approvals" and owner is not None and self.config.approver(actor.identity):
+            # A configured approver decides on work they do not own (ADR 0002); which
+            # effects they may decide is checked per effect by the approver policy.
+            return True
         if owner is None:
             # Unknown process: let the control plane answer 404 without revealing anything else.
             return process_id not in self.kernel.processes

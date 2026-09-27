@@ -110,11 +110,16 @@ class Application:
         if len(parts) == 4 and parts[:2] == ["v1", "processes"]:
             if parts[3] == "approvals":
                 if method == "GET":
-                    return 200, self.service.pending_approvals(parts[2])
+                    return 200, self.service.pending_approvals(parts[2], actor.identity)
                 if method == "POST":
                     return 200, self.service.resolve_approval(parts[2], data)
             if parts[3] == "interventions" and method == "POST":
                 return 200, await self.service.intervene(parts[2], data)
+        if method == "POST" and parts[:2] == ["v1", "processes"] and parts[3:] == ["plan", "materialize"] \
+                and len(parts) == 5:
+            return 200, await self.service.materialize_plan(parts[2], actor.identity)
+        if method == "POST" and len(parts) == 6 and parts[:2] == ["v1", "processes"] and parts[3] == "effects":
+            return await self.service.effect_operation(parts[2], parts[4], parts[5], data)
         if method == "GET" and len(parts) in (3, 4) and parts[:2] == ["v1", "processes"]:
             if len(parts) == 3:
                 return 200, self.service.inspect(parts[2])

@@ -9,7 +9,8 @@ from typing import Any
 
 from praxis.observability.health import RuntimeHealth
 from praxis.kernel.lifecycle import TERMINAL
-from praxis.kernel.effect_service import EffectService
+from praxis.kernel.effect_service import EffectReceipt, EffectService
+from praxis.kernel.effects import Effect
 from praxis.kernel.events import Event
 from praxis.kernel.retry import RetryPolicy
 from praxis.kernel.runtime import CancellationPolicy, Kernel, ProcessSignal
@@ -28,12 +29,20 @@ class APIError(ValueError):
         return {"error": {"code": self.code, "details": self.details}}
 
 
+EFFECT_STATUS = {"effect_adapter_unavailable": 503, "reconciliation_unavailable": 503,
+                 "application_uncertain": 409, "effect_not_approved_or_stale": 409}
+
+
+def receipt_dict(receipt: EffectReceipt) -> dict[str, Any]:
+    return {"applied": receipt.applied, "reason": receipt.reason, "external_id": receipt.external_id}
+
+
 class ControlPlane:
     def __init__(self, kernel: Kernel, effects: EffectService | None = None,
                  health: RuntimeHealth | None = None):
         self.effects = effects
         self.kernel = kernel
-        self.health = health or RuntimeHealth(kernel)
+        self.health = health or RuntimeHealth(kernel, effects=effects)
         self.operation_locks: dict[str, asyncio.Lock] = {}
 
     def submit(self, data: dict[str, Any], idempotency_key: str | None = None, *, actor: str = "kernel") -> dict[str, Any]:
@@ -162,12 +171,16 @@ class ControlPlane:
                 "operation": operation, "attempt_id": process.attempt_id, "response": response}, parent_id=process.parent_id))
             return {"process_id": process_id, "attempt_id": process.attempt_id, "control": response}
 
-    def pending_approvals(self, process_id: str) -> dict[str, Any]:
+    def pending_approvals(self, process_id: str, actor: str | None = None) -> dict[str, Any]:
         family = {p["process_id"] for p in self.inspect_tree(process_id)["processes"]}
         if self.effects is None:
             raise APIError(503, "effect_service_unavailable")
         return {"approvals": [json.loads(effect.to_json()) for effect in self.effects.pending()
-                              if effect.process_id in family]}
+                              if effect.process_id in family and self.may_see(actor, effect)]}
+
+    def may_see(self, actor: str | None, effect: Effect) -> bool:
+        """Deployments narrow what a caller who does not own the process sees."""
+        return True
 
     def resolve_approval(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
         self.inspect(process_id)
@@ -184,13 +197,57 @@ class ControlPlane:
             if not isinstance(actor, str) or not actor or not isinstance(reason, str) or not reason.strip():
                 raise ValueError("actor and reason required")
             updated = self.effects.resolve_approval(effect.effect_id, data["version"], data["approved"],
-                                                    actor=actor, reason=reason)
+                                                    actor=actor, reason=reason,
+                                                    expires_at=self.approval_expiry(effect))
             return {"effect": json.loads(updated.to_json()),
                     "approvals": [asdict(record) for record in self.effects.approvals(effect.effect_id)]}
         except APIError:
             raise
         except (ValueError, TypeError, KeyError, PermissionError):
             raise APIError(409, "approval_rejected") from None
+
+    async def materialize_plan(self, process_id: str, actor: str) -> dict[str, Any]:
+        """Deployments that run plans override this (ADR 0003)."""
+        self.inspect(process_id)
+        raise APIError(404, "route_not_found")
+
+    def approval_expiry(self, effect: Effect) -> str | None:
+        """Deployments set an expiry for approvals; the default is none."""
+        return None
+
+    async def effect_operation(self, process_id: str, effect_id: str, operation: str,
+                               data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Apply an approved effect or reconcile an uncertain one (ADR 0001)."""
+        self.inspect(process_id)
+        if self.effects is None:
+            raise APIError(503, "effect_service_unavailable")
+        if operation not in {"apply", "reconcile"}:
+            raise APIError(404, "route_not_found")
+        async with self.operation_locks.setdefault(process_id, asyncio.Lock()):
+            try:
+                effect = self.effects.load(effect_id)
+            except ValueError:
+                raise APIError(404, "effect_not_found") from None
+            process = self.kernel.processes[process_id]
+            if effect.process_id != process_id:
+                raise APIError(404, "effect_not_found")
+            if data.get("attempt_id") != process.attempt_id or effect.attempt_id != process.attempt_id:
+                raise APIError(409, "stale_process_attempt")
+            if operation == "apply":
+                version = data.get("version")
+                if type(version) is not int:
+                    raise APIError(422, "effect_version_required")
+                receipt = await self.effects.apply(effect_id, version)
+            else:
+                receipt = await self.effects.reconcile(effect_id)
+            current = self.effects.load(effect_id)
+            status = 200 if receipt.applied or current.status.value in {"applied", "failed"} else \
+                EFFECT_STATUS.get(receipt.reason, 409)
+            body = {"process_id": process_id, "attempt_id": process.attempt_id,
+                    "effect": json.loads(current.to_json()), "receipt": receipt_dict(receipt)}
+            if status >= 400:
+                body["error"] = {"code": receipt.reason, "details": {}}
+            return status, body
 
     async def intervene(self, process_id: str, data: dict[str, Any]) -> dict[str, Any]:
         self.inspect(process_id)

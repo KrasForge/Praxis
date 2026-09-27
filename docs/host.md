@@ -47,6 +47,9 @@ is closed: unknown keys and unsafe combinations are rejected at load time.
 | `noesis.publication` | `off`, `manual` (default) or `auto` |
 | `noesis.context_domains` | Optional allowlist of Noesis domains specs may request context from |
 | `[limits]` | Optional admission limits; see [Limits and deadlines](#limits-and-deadlines) |
+| `[[effects]]` | Effect adapters, one per kind; see [Effects and approvals](#effects-and-approvals) |
+| `[[effect_policy]]` | Approval rules for proposed effects; deny by default |
+| `planning.grant_allowlist` | The most a plan may request for a node: `resource`, `actions`, `scope`. Never `*` |
 
 A non-loopback bind without local TLS is refused unless
 `tls_terminated_upstream = true` says a proxy owns TLS. Secrets are never
@@ -67,8 +70,8 @@ identity. Other clients sending the header are rejected.
 | `submit` | `POST /v1/processes` |
 | `read` | inspect, `tree`, `events` |
 | `control` | `control`, `interventions` |
-| `approve` | `approvals` (list and decide) |
-| `publish` | `POST /v1/processes/{id}/publication`, and auto-publication opt-in |
+| `approve` | `approvals` (list and decide), and `plan/materialize` |
+| `publish` | `POST /v1/processes/{id}/publication`, effect `apply` and `reconcile`, and auto-publication opt-in |
 | `health` | `GET /v1/health` |
 | `admin` | every role, on every process |
 
@@ -78,6 +81,82 @@ root of the process tree:
 - The client acting as itself reaches all processes it or its users submitted.
 - `admin` reaches everything.
 - Processes created outside the API have no submitting actor and are admin-only.
+
+A person named as an approver in an `[[effect_policy]]` rule, and whose client
+has the `approve` role, can use the approvals routes on process trees they do not
+own. Which effects they may decide is checked per effect.
+
+## Effects and approvals
+
+A process proposes effects by writing files under `.praxis/effects/` (see
+[concepts](concepts.md#to-reach-outside-effects)). When it completes verified, the
+host finds the most specific `[[effect_policy]]` rule for each effect: an exact
+target wins over `prefix*`, and a longer prefix over a shorter one.
+
+| Policy | What happens |
+| --- | --- |
+| no rule, or `deny` | The effect is staged without authority and recorded as `rejected` |
+| `auto` | The host grants the process exactly the authority of the effect, and approves it. Not allowed for `message_send` or `artifact_publish` |
+| `human` | The host grants the authority and queues the effect for the rule's `approvers` |
+
+```toml
+[[effect_policy]]
+kind = "message_send"
+target = "releases"
+policy = "human"
+approvers = ["modulo/*", "ops"]    # client, client/user or client/*
+separate_submitter = true          # the submitter cannot approve their own effect
+expires_seconds = 3600             # an approval not applied in time lapses
+
+[[effects]]
+kind = "message_send"
+adapter = "webhook"
+base_url = "https://hooks.internal"
+token_env = "PRAXIS_WEBHOOK_TOKEN"
+```
+
+People are not processes, so approver authority comes from this configuration,
+never from a kernel capability; a reload changes it at once, and a restart keeps
+it (ADR 0002). Each decision is recorded with its actor. Approved effects are
+applied with `POST /v1/processes/{id}/effects/{effect_id}/apply` (role
+`publish`).
+
+| Adapter | Kind | Settings |
+| --- | --- | --- |
+| `git` | `git_commit` | `repositories` (name to absolute path), `author_name`, `author_email`. Targets name a repository; `HEAD` must equal `expected_head`; hooks and signing are disabled; it never pushes |
+| `webhook` | `message_send` | `base_url`, `send_path`, `status_path`, credential. The receiver deduplicates by `idempotency_key` and answers `GET <status_path>/<key>` |
+| `http_put` | `artifact_publish` | `base_url`, `prefix`, credential. Uploads verified snapshot bytes to `<prefix>/<idempotency_key>` |
+
+Credentials are `token_env` or `token_file` and are sent as bearer tokens; TLS
+uses `ca_file`, `client_certfile` and `client_keyfile`. An adapter for an
+irreversible kind must support lookup, or the host refuses to start. Adapters
+and their settings change only with a restart; the policy reloads on `SIGHUP`.
+
+At startup, the host stages again any proposals journaled before a crash; the
+idempotency keys make this safe. An effect left in `applying` is reported as
+`effect_uncertain` in `GET /v1/health` and on its process, and it is never
+applied again. Reconcile it with
+`POST /v1/processes/{id}/effects/{effect_id}/reconcile`.
+
+## Plans
+
+The host registers the `plan` validator (see
+[concepts](concepts.md#to-plan-a-plan-is-verified-output)). A grant that a plan
+requests is admitted when an allowlist entry has the same resource, a superset of
+its actions, and a scope that contains it:
+
+```toml
+[planning]
+grant_allowlist = [
+  {resource = "filesystem", actions = ["read"], scope = "/srv/data"},
+  {resource = "network", actions = ["connect"], scope = "*.internal.example"},
+]
+```
+
+Requestable resources are `filesystem` (read, write), `network` (connect),
+`secret` (read) and `effect` (stage, apply). Materialization checks the
+allowlist again, so a grant removed by a reload is refused and recorded in the
+`plan.materialized` event. The allowlist reloads on `SIGHUP`.
 
 ## Transport security
 
@@ -190,25 +269,31 @@ while the host is stopped. A running host applies the policy through
 another ASGI server. It applies:
 
 - client tokens, roles and delegation;
-- the server certificate and key, and additional trusted client CAs (`serve` only);
+- the server certificate and key, and the trusted client CAs, including removals
+  (`serve` only);
 - the Noesis credential (from `token_file`; environment variables cannot change in a
   running process), CA and client certificate, swapped as one transport;
-- `noesis.context_domains`.
+- `noesis.context_domains`;
+- `[[effect_policy]]` and the `[planning]` allowlist.
 
 Everything is read and validated before anything changes, so an invalid file, an
 unreadable certificate or an empty credential leaves the running configuration in
 place. The result is logged either way. Changes to `data_dir`, `executors`, the bind
-address, the TLS mode, `[limits]` or the Noesis origin and publication mode are
-refused and need a restart.
+address, the TLS mode, `[limits]`, `[retention]`, `[[effects]]` or the Noesis
+origin and publication mode are refused and need a restart.
 
 To rotate a client token without an outage:
 1. List both digests (`token_sha256 = ["<new>", "<old>"]`) and send `SIGHUP`.
 2. Move the client to the new token.
 3. Remove the old digest and send `SIGHUP` again. The old token is rejected from then on.
 
-New TLS handshakes use a reloaded certificate. Connections already open keep the
-certificate they negotiated. OpenSSL cannot remove a trusted CA from a live context,
-so dropping a client CA needs a restart.
+A reload builds a new server TLS context from the current files. OpenSSL cannot
+remove a trusted CA from a live context, so every new handshake switches to the new
+context instead. A client certificate from a CA that was removed is refused from
+the next connection on. Under `serve`, open connections whose client certificate
+was issued by a CA that is no longer trusted are closed; the match is on the
+issuer name, so list intermediate CAs in `tls_client_ca` too. Other open
+connections keep the certificate they negotiated.
 
 ## What Modulo calls
 
@@ -232,6 +317,8 @@ authenticated itself: Praxis trusts the delegating client for that assertion.
 ## Not covered
 
 - Distributed rate limiting: limits are per host process.
-- Removing a trusted client CA without a restart.
-- Multi-controller placement: the host is one kernel owner, as in [operations](operations.md).
+- Multi-controller placement: one controller owns one store
+  ([ADR 0004](adr/0004-single-controller-ownership.md)). The host holds
+  `controller.lock` in `data_dir`, so a second host on the same directory refuses
+  to start.
 - Journal compaction: retention removes files, never process records or events.

@@ -10,6 +10,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 ROLES = frozenset({"submit", "read", "control", "approve", "publish", "health", "admin"})
+EFFECT_ADAPTERS = {"git_commit": "git", "message_send": "webhook", "artifact_publish": "http_put"}
+EFFECT_KINDS = frozenset({"file_write", "git_commit", "message_send", "artifact_publish"})
+IRREVERSIBLE_KINDS = frozenset({"message_send", "artifact_publish"})
+EFFECT_POLICIES = frozenset({"auto", "human", "deny"})
+APPROVER = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}(/([A-Za-z0-9][A-Za-z0-9._@+-]{0,127}|\*))?")
 EXECUTORS = frozenset({"fake", "local"})
 PUBLICATION_MODES = frozenset({"off", "manual", "auto"})
 CLIENT_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -84,6 +89,70 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True)
+class EffectAdapterConfig:
+    """One ``[[effects]]`` entry. Credentials are referenced by environment or file."""
+    kind: str
+    adapter: str
+    repositories: tuple[tuple[str, str], ...] = ()
+    author_name: str = "Praxis"
+    author_email: str = "praxis@localhost"
+    base_url: str | None = None
+    send_path: str = "/messages"
+    status_path: str = "/messages"
+    prefix: str = "/artifacts"
+    token_env: str | None = None
+    token_file: str | None = None
+    ca_file: str | None = None
+    client_certfile: str | None = None
+    client_keyfile: str | None = None
+    timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
+class EffectPolicyRule:
+    """One ``[[effect_policy]]`` rule (ADR 0002). ``target`` is exact, ``prefix*`` or ``*``."""
+    kind: str
+    target: str
+    policy: str
+    approvers: tuple[str, ...] = ()
+    expires_seconds: int | None = None
+    separate_submitter: bool = False
+
+    def matches(self, kind: str, target: str) -> bool:
+        if kind != self.kind:
+            return False
+        if self.target.endswith("*"):
+            return target.startswith(self.target[:-1])
+        return target == self.target
+
+    @property
+    def specificity(self) -> tuple[int, int]:
+        """Exact targets win over prefixes, and longer prefixes over shorter ones."""
+        return (0 if self.target.endswith("*") else 1, len(self.target))
+
+    def approver(self, identity: str) -> bool:
+        for pattern in self.approvers:
+            if pattern == identity:
+                return True
+            if pattern.endswith("/*") and identity.startswith(pattern[:-1]) and len(identity) > len(pattern) - 1:
+                return True
+        return False
+
+
+@dataclass(frozen=True)
+class GrantAllowance:
+    """One ``[planning]`` allowlist entry: the most a plan may request for a node."""
+    resource: str
+    actions: frozenset[str]
+    scope: str
+
+
+@dataclass(frozen=True)
+class PlanningConfig:
+    grant_allowlist: tuple[GrantAllowance, ...] = ()
+
+
+@dataclass(frozen=True)
 class HostConfig:
     data_dir: str
     clients: tuple[ClientConfig, ...]
@@ -92,6 +161,17 @@ class HostConfig:
     noesis: NoesisConfig | None = None
     limits: LimitsConfig = LimitsConfig()
     retention: RetentionConfig = RetentionConfig()
+    effects: tuple[EffectAdapterConfig, ...] = ()
+    effect_policy: tuple[EffectPolicyRule, ...] = ()
+    planning: PlanningConfig = PlanningConfig()
+
+    def effect_rule(self, kind: str, target: str) -> EffectPolicyRule | None:
+        """The most specific matching rule; None means deny."""
+        matching = [rule for rule in self.effect_policy if rule.matches(kind, target)]
+        return max(matching, key=lambda rule: rule.specificity, default=None)
+
+    def approver(self, identity: str) -> bool:
+        return any(rule.approver(identity) for rule in self.effect_policy)
 
     def client(self, identity: str) -> ClientConfig | None:
         return next((client for client in self.clients if client.id == identity), None)
@@ -107,7 +187,8 @@ def load_host_config(path: Path) -> HostConfig:
 
 
 def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
-    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits", "retention"})
+    _closed("root", data, {"data_dir", "executors", "server", "clients", "noesis", "limits", "retention",
+                           "effects", "effect_policy", "planning"})
     data_dir = _path("data_dir", data.get("data_dir"))
     if data_dir is None:
         raise HostConfigError("data_dir", "required")
@@ -119,7 +200,8 @@ def parse_host_config(data: Mapping[str, Any]) -> HostConfig:
     clients = _clients(data.get("clients"))
     noesis = None if "noesis" not in data else _noesis(data["noesis"])
     return HostConfig(data_dir, clients, frozenset(executors), server, noesis, _limits(data.get("limits", {})),
-                      _retention(data.get("retention", {})))
+                      _retention(data.get("retention", {})), _effects(data.get("effects", [])),
+                      _effect_policy(data.get("effect_policy", [])), _planning(data.get("planning", {})))
 
 
 def is_loopback(host: str) -> bool:
@@ -268,6 +350,141 @@ def _retention(data: Any) -> RetentionConfig:
             raise HostConfigError("retention.interval_hours", "requires workspace_days or canonical_revisions")
     return RetentionConfig(counts["workspace_days"], counts["canonical_revisions"], tuple(roots),
                            None if interval is None else float(interval))
+
+
+def _effects(data: Any) -> tuple[EffectAdapterConfig, ...]:
+    if not isinstance(data, list):
+        raise HostConfigError("effects", "expected array of tables")
+    entries = []
+    for index, item in enumerate(data):
+        field = f"effects[{index}]"
+        common = {"kind", "adapter", "timeout_seconds"}
+        http = {"base_url", "token_env", "token_file", "ca_file", "client_certfile", "client_keyfile"}
+        kind = item.get("kind") if isinstance(item, Mapping) else None
+        if kind not in EFFECT_ADAPTERS:
+            raise HostConfigError(field + ".kind", "expected one of " + ", ".join(sorted(EFFECT_ADAPTERS)))
+        allowed = common | ({"repositories", "author_name", "author_email"} if kind == "git_commit" else
+                            http | ({"send_path", "status_path"} if kind == "message_send" else {"prefix"}))
+        _closed(field, item, allowed)
+        if item.get("adapter") != EFFECT_ADAPTERS[kind]:
+            raise HostConfigError(field + ".adapter", f"expected {EFFECT_ADAPTERS[kind]!r} for {kind}")
+        timeout = item.get("timeout_seconds", 30.0)
+        if type(timeout) not in (int, float) or not 0 < timeout <= 300:
+            raise HostConfigError(field + ".timeout_seconds", "expected 0 < seconds <= 300")
+        values: dict[str, Any] = {"timeout_seconds": float(timeout)}
+        if kind == "git_commit":
+            repositories = item.get("repositories")
+            if (not isinstance(repositories, Mapping) or not repositories
+                    or any(not isinstance(k, str) or not CLIENT_ID.fullmatch(k) for k in repositories)):
+                raise HostConfigError(field + ".repositories", "expected table of lowercase names to paths")
+            for name, path in repositories.items():
+                if _path(f"{field}.repositories.{name}", path) is None or not str(path).startswith("/"):
+                    raise HostConfigError(f"{field}.repositories.{name}", "expected absolute path")
+            values["repositories"] = tuple(sorted(repositories.items()))
+            for key in ("author_name", "author_email"):
+                if key in item and (not isinstance(item[key], str) or not item[key].strip() or "\n" in item[key]):
+                    raise HostConfigError(f"{field}.{key}", "expected single-line string")
+                if key in item:
+                    values[key] = item[key]
+        else:
+            base_url = item.get("base_url")
+            parsed = urlsplit(base_url) if isinstance(base_url, str) else None
+            if (parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.query or parsed.fragment):
+                raise HostConfigError(field + ".base_url", "expected http(s) origin")
+            if parsed.scheme == "http" and not is_loopback(parsed.hostname):
+                raise HostConfigError(field + ".base_url", "non-loopback endpoint requires https")
+            values["base_url"] = base_url.rstrip("/")
+            token_env = item.get("token_env")
+            if token_env is not None and (not isinstance(token_env, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", token_env)):
+                raise HostConfigError(field + ".token_env", "expected environment variable name")
+            token_file = _path(field + ".token_file", item.get("token_file"))
+            if token_env is not None and token_file is not None:
+                raise HostConfigError(field + ".token_env", "configure at most one of token_env or token_file")
+            values.update(token_env=token_env, token_file=token_file)
+            for key in ("ca_file", "client_certfile", "client_keyfile"):
+                values[key] = _path(f"{field}.{key}", item.get(key))
+            if values["client_keyfile"] is not None and values["client_certfile"] is None:
+                raise HostConfigError(field + ".client_keyfile", "requires client_certfile")
+            if (values["ca_file"] or values["client_certfile"]) and parsed.scheme != "https":
+                raise HostConfigError(field + ".base_url", "TLS settings require https")
+            for key in ("send_path", "status_path", "prefix"):
+                if key in item:
+                    value = item[key]
+                    if not isinstance(value, str) or not value.startswith("/") or value.startswith("//"):
+                        raise HostConfigError(f"{field}.{key}", "expected absolute path")
+                    values[key] = value
+        entries.append(EffectAdapterConfig(kind, item["adapter"], **values))
+    if len({entry.kind for entry in entries}) != len(entries):
+        raise HostConfigError("effects", "one adapter per effect kind")
+    return tuple(entries)
+
+
+def _effect_policy(data: Any) -> tuple[EffectPolicyRule, ...]:
+    if not isinstance(data, list):
+        raise HostConfigError("effect_policy", "expected array of tables")
+    rules = []
+    for index, item in enumerate(data):
+        field = f"effect_policy[{index}]"
+        _closed(field, item, {"kind", "target", "policy", "approvers", "expires_seconds", "separate_submitter"})
+        kind, target, policy = item.get("kind"), item.get("target"), item.get("policy")
+        if kind not in EFFECT_KINDS:
+            raise HostConfigError(field + ".kind", "expected one of " + ", ".join(sorted(EFFECT_KINDS)))
+        if (not isinstance(target, str) or not target or "\x00" in target
+                or ("*" in target and (target.count("*") != 1 or not target.endswith("*")))):
+            raise HostConfigError(field + ".target", "expected exact target, prefix* or *")
+        if policy not in EFFECT_POLICIES:
+            raise HostConfigError(field + ".policy", "expected one of " + ", ".join(sorted(EFFECT_POLICIES)))
+        if policy == "auto" and kind in IRREVERSIBLE_KINDS:
+            raise HostConfigError(field + ".policy", "irreversible effects cannot be approved automatically")
+        approvers = item.get("approvers", [])
+        if (not isinstance(approvers, list) or len(set(approvers)) != len(approvers)
+                or any(not isinstance(a, str) or not APPROVER.fullmatch(a) for a in approvers)):
+            raise HostConfigError(field + ".approvers", "expected unique client, client/user or client/* names")
+        if policy == "human" and not approvers:
+            raise HostConfigError(field + ".approvers", "human policy requires approvers")
+        if policy != "human" and approvers:
+            raise HostConfigError(field + ".approvers", "only human policy has approvers")
+        expires = item.get("expires_seconds")
+        if expires is not None and (type(expires) is not int or not 1 <= expires <= 31_536_000):
+            raise HostConfigError(field + ".expires_seconds", "expected 1..31536000")
+        separate = item.get("separate_submitter", False)
+        if type(separate) is not bool:
+            raise HostConfigError(field + ".separate_submitter", "expected boolean")
+        rules.append(EffectPolicyRule(kind, target, policy, tuple(approvers), expires, separate))
+    if len({(rule.kind, rule.target) for rule in rules}) != len(rules):
+        raise HostConfigError("effect_policy", "duplicate kind and target")
+    return tuple(rules)
+
+
+GRANTABLE = {"filesystem": {"read", "write"}, "network": {"connect"}, "secret": {"read"},
+             "effect": {"stage", "apply"}}
+
+
+def _planning(data: Any) -> PlanningConfig:
+    _closed("planning", data, {"grant_allowlist"})
+    entries = data.get("grant_allowlist", [])
+    if not isinstance(entries, list):
+        raise HostConfigError("planning.grant_allowlist", "expected array of tables")
+    allowances = []
+    for index, item in enumerate(entries):
+        field = f"planning.grant_allowlist[{index}]"
+        _closed(field, item, {"resource", "actions", "scope"})
+        resource, actions, scope = item.get("resource"), item.get("actions"), item.get("scope")
+        if resource not in GRANTABLE:
+            raise HostConfigError(field + ".resource", "expected one of " + ", ".join(sorted(GRANTABLE)))
+        if (not isinstance(actions, list) or not actions or len(set(actions)) != len(actions)
+                or not set(actions) <= GRANTABLE[resource]):
+            raise HostConfigError(field + ".actions", "expected unique actions from "
+                                  + ", ".join(sorted(GRANTABLE[resource])))
+        # A wildcard would hand every plan the host's whole authority for that resource.
+        if not isinstance(scope, str) or not scope.strip() or "*" in scope.replace("*.", "", 1) \
+                or scope == "*" or "\x00" in scope:
+            raise HostConfigError(field + ".scope", "expected a concrete scope, never *")
+        if resource == "filesystem" and (not scope.startswith("/") or scope == "/"):
+            raise HostConfigError(field + ".scope", "expected an absolute path below /")
+        allowances.append(GrantAllowance(resource, frozenset(actions), scope))
+    return PlanningConfig(tuple(allowances))
 
 
 def _closed(field: str, data: Any, allowed: set[str]) -> None:

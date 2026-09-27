@@ -34,6 +34,17 @@ class ReconciliableEffectAdapter(EffectAdapter, Protocol):
     async def lookup(self, idempotency_key: str) -> EffectReceipt | None: ...
 
 
+@runtime_checkable
+class ApproverPolicy(Protocol):
+    """Decides whether an actor that is not a process may decide on an effect (ADR 0002).
+
+    People are not processes: the kernel journals every grant and decision under a
+    process identity, so a person's authority comes from host configuration instead.
+    """
+
+    def may_decide(self, actor: str, effect: Effect) -> bool: ...
+
+
 class EffectPolicy(str, Enum):
     AUTO = "auto"
     HUMAN = "human"
@@ -53,10 +64,12 @@ class ApprovalRecord:
 
 class EffectService:
     def __init__(self, store: SQLiteStore, authority: Authority,
-                 adapters: dict[EffectKind, EffectAdapter] | None = None):
+                 adapters: dict[EffectKind, EffectAdapter] | None = None,
+                 approvers: ApproverPolicy | None = None):
         self.store = store
         self.authority = authority
         self.adapters = dict(adapters or {})
+        self.approvers = approvers
         with store._transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS effects (id TEXT PRIMARY KEY, "
                                "process_id TEXT NOT NULL REFERENCES processes(id), idempotency_key TEXT UNIQUE NOT NULL, "
@@ -118,7 +131,10 @@ class EffectService:
             expiry = datetime.fromisoformat(expires_at)
             if expiry.utcoffset() is None or expiry <= datetime.fromisoformat(now()):
                 raise ValueError("approval_expired")
-        self.authority.require(actor, Resource.EFFECT, "approve", effect.target)
+        if actor in self.authority.parents or self.approvers is None:
+            self.authority.require(actor, Resource.EFFECT, "approve", effect.target)
+        elif not self.approvers.may_decide(actor, effect):
+            raise PermissionError("approver_not_authorized")
         if approved:
             self.authority.require(effect.process_id, effect.authority.resource, effect.authority.action, effect.authority.scope)
         if type(expected_version) is not int or effect.version != expected_version or effect.status != EffectStatus.PROPOSED:
@@ -149,6 +165,18 @@ class EffectService:
                                    (effect_id, expected_version))
             return effect
         return self.resolve_approval(effect_id, expected_version, policy == EffectPolicy.AUTO, actor=actor, reason=reason)
+
+    def find(self, idempotency_key: str) -> Effect | None:
+        with self.store._transaction() as connection:
+            row = connection.execute("SELECT body FROM effects WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            return None if row is None else Effect.from_json(row[0])
+
+    def in_flight(self) -> tuple[Effect, ...]:
+        """Effects left in ``applying``: uncertain until reconciled, never retried."""
+        with self.store._transaction() as connection:
+            rows = connection.execute("SELECT body FROM effects ORDER BY id").fetchall()
+        effects = (Effect.from_json(row[0]) for row in rows)
+        return tuple(effect for effect in effects if effect.status == EffectStatus.APPLYING)
 
     def pending(self) -> tuple[Effect, ...]:
         with self.store._transaction() as connection:
